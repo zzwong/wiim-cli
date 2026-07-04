@@ -1,0 +1,35 @@
+version: "2"
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - revive
+    - misspell
+    - gosec
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # WiiM devices serve self-signed certificates on the LAN, so verification
+      # is impossible; traffic is device-control on the local network. This is
+      # deliberate and documented in the code.
+      - linters:
+          - gosec
+        path: internal/wiim/
+        text: G402
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

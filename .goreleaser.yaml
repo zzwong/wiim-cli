@@ -1,0 +1,44 @@
+version: 2
+
+project_name: wiim
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/wiim
+    binary: wiim
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/zzwong/wiim-cli/internal/wiim.Version={{.Version}}
+
+archives:
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: git
+  filters:
+    exclude:
+      - "^docs:"
+      - "^ci:"
+      - "^chore:"

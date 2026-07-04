@@ -1,0 +1,5 @@
+/wiim
+*.test
+coverage.out
+*.local.md
+/docs/plans/

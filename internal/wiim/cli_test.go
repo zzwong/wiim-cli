@@ -1,0 +1,327 @@
+package wiim
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+)
+
+type fakeDevice struct {
+	calls   []string
+	host    string
+	timeout float64
+}
+
+func (f *fakeDevice) CastInfo() (map[string]any, error) {
+	return map[string]any{"name": "WiiM Ultra"}, nil
+}
+func (f *fakeDevice) StatusEx() (map[string]any, error) {
+	return map[string]any{"project": "WiiM_Ultra", "firmware": "fw", "internet": "1"}, nil
+}
+func (f *fakeDevice) PlayerStatus() (map[string]any, error) {
+	return map[string]any{"status": "stop", "vol": "38", "mute": "0", "mode": "49"}, nil
+}
+func (f *fakeDevice) MetaInfo() map[string]any {
+	return map[string]any{"metaData": map[string]any{"title": "Song"}}
+}
+func (f *fakeDevice) Command(c string) (any, error) {
+	f.calls = append(f.calls, "raw:"+c)
+	return map[string]any{"command": c}, nil
+}
+func (f *fakeDevice) SetVolume(_ int) error   { f.calls = append(f.calls, "vol"); return nil }
+func (f *fakeDevice) VolumeUp(_ int) error    { f.calls = append(f.calls, "up"); return nil }
+func (f *fakeDevice) VolumeDown(_ int) error  { f.calls = append(f.calls, "down"); return nil }
+func (f *fakeDevice) Mute(_ bool) error       { f.calls = append(f.calls, "mute"); return nil }
+func (f *fakeDevice) Playback(a string) error { f.calls = append(f.calls, "playback:"+a); return nil }
+func (f *fakeDevice) PlayURL(u string) error  { f.calls = append(f.calls, "play-url:"+u); return nil }
+func (f *fakeDevice) PlayM3U(u string) error  { f.calls = append(f.calls, "play-m3u:"+u); return nil }
+func (f *fakeDevice) PlayPromptURL(u string) error {
+	f.calls = append(f.calls, "prompt-url:"+u)
+	return nil
+}
+func (f *fakeDevice) ClearPlaylist() error           { f.calls = append(f.calls, "clear"); return nil }
+func (f *fakeDevice) Seek(_ int) error               { f.calls = append(f.calls, "seek"); return nil }
+func (f *fakeDevice) PlayPreset(_ int, _ *int) error { f.calls = append(f.calls, "preset"); return nil }
+func (f *fakeDevice) SwitchInput(input string) error {
+	f.calls = append(f.calls, "input:"+input)
+	return nil
+}
+
+func withFake(t *testing.T) (*fakeDevice, func()) {
+	t.Helper()
+	fd := &fakeDevice{}
+	old := newDevice
+	newDevice = func(host string, timeout float64) device {
+		fd.host = host
+		fd.timeout = timeout
+		return fd
+	}
+	return fd, func() { newDevice = old }
+}
+
+func runTest(args ...string) (int, string, string) {
+	var out, errb bytes.Buffer
+	err := Run(args, &out, &errb)
+	if err != nil {
+		return ExitCode(err), out.String(), err.Error()
+	}
+	return 0, out.String(), errb.String()
+}
+
+func TestHelpDoesNotCreateClient(t *testing.T) {
+	created := false
+	old := newDevice
+	newDevice = func(_ string, _ float64) device { created = true; return &fakeDevice{} }
+	defer func() { newDevice = old }()
+	code, out, _ := runTest("--help")
+	if code != 0 || !strings.Contains(out, "Usage:") {
+		t.Fatalf("code %d out %s", code, out)
+	}
+	if !strings.Contains(out, "--host") || strings.Contains(out, "\n  -host") {
+		t.Fatalf("help should show double-dash flags only: %s", out)
+	}
+	if created {
+		t.Fatal("created client during help")
+	}
+}
+
+func TestStatusJSONAllowsOptionsAfterCommand(t *testing.T) {
+	_, done := withFake(t)
+	defer done()
+	code, out, errText := runTest("status", "--host", "1.2.3.4", "--json")
+	if code != 0 {
+		t.Fatalf("code %d err %s", code, errText)
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(out), &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["host"] != "1.2.3.4" || data["volume"].(float64) != 38 {
+		t.Fatalf("data %#v", data)
+	}
+}
+
+func TestNow(t *testing.T) {
+	_, done := withFake(t)
+	defer done()
+	code, out, _ := runTest("--host", "1.2.3.4", "now")
+	if code != 0 || !strings.Contains(out, "Title: Song") {
+		t.Fatalf("code %d out %s", code, out)
+	}
+}
+
+func TestVolumeGetSetAndMaxVolume(t *testing.T) {
+	_, done := withFake(t)
+	defer done()
+	code, out, _ := runTest("--host", "1.2.3.4", "volume")
+	if code != 0 || strings.TrimSpace(out) != "38" {
+		t.Fatalf("code %d out %q", code, out)
+	}
+	code, out, _ = runTest("--host", "1.2.3.4", "volume", "30")
+	if code != 0 || !strings.Contains(out, "Volume set to 30") {
+		t.Fatalf("code %d out %q", code, out)
+	}
+	code, _, errText := runTest("--host", "1.2.3.4", "volume", "60")
+	if code != 2 || !strings.Contains(errText, "maxVolume 55") {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	code, _, errText = runTest("--host", "1.2.3.4", "volume", "+20")
+	if code != 2 || !strings.Contains(errText, "maxVolume 55") {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+}
+
+func TestVolumeAllowsSignedRelativeValues(t *testing.T) {
+	fd, done := withFake(t)
+	defer done()
+	code, out, errText := runTest("--host", "1.2.3.4", "volume", "+5")
+	if code != 0 || !strings.Contains(out, "Volume increased by 5") || fd.calls[len(fd.calls)-1] != "up" {
+		t.Fatalf("code %d out %q err %q calls %#v", code, out, errText, fd.calls)
+	}
+	code, out, errText = runTest("--host", "1.2.3.4", "volume", "-5")
+	if code != 0 || !strings.Contains(out, "Volume decreased by 5") || fd.calls[len(fd.calls)-1] != "down" {
+		t.Fatalf("code %d out %q err %q calls %#v", code, out, errText, fd.calls)
+	}
+	code, out, errText = runTest("volume", "-5", "--host", "1.2.3.4")
+	if code != 0 || !strings.Contains(out, "Volume decreased by 5") {
+		t.Fatalf("code %d out %q err %q", code, out, errText)
+	}
+	code, out, errText = runTest("--host", "1.2.3.4", "volume", "--", "-5")
+	if code != 0 || !strings.Contains(out, "Volume decreased by 5") {
+		t.Fatalf("code %d out %q err %q", code, out, errText)
+	}
+}
+
+func TestVolumeGlobalFlagsBeforeAndAfterCommand(t *testing.T) {
+	t.Setenv("WIIM_HOST", "")
+	fd, done := withFake(t)
+	defer done()
+	cfgPath := t.TempDir() + "/config.json"
+	if err := os.WriteFile(cfgPath, []byte(`{"defaultHost":"cfg-host","timeout":4,"maxVolume":55}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errText := runTest("--config", cfgPath, "volume")
+	if code != 0 || strings.TrimSpace(out) != "38" || fd.host != "cfg-host" || fd.timeout != 4 {
+		t.Fatalf("code %d out %q err %q host %q timeout %v", code, out, errText, fd.host, fd.timeout)
+	}
+	code, out, errText = runTest("volume", "--config", cfgPath)
+	if code != 0 || strings.TrimSpace(out) != "38" || fd.host != "cfg-host" || fd.timeout != 4 {
+		t.Fatalf("code %d out %q err %q host %q timeout %v", code, out, errText, fd.host, fd.timeout)
+	}
+	code, out, errText = runTest("--host", "pre-host", "--timeout", "7", "volume", "30")
+	if code != 0 || !strings.Contains(out, "Volume set to 30") || fd.host != "pre-host" || fd.timeout != 7 {
+		t.Fatalf("code %d out %q err %q host %q timeout %v", code, out, errText, fd.host, fd.timeout)
+	}
+	code, out, errText = runTest("volume", "30", "--host", "post-host", "--timeout", "8", "--json")
+	if code != 0 || !strings.Contains(out, `"volume": 30`) || fd.host != "post-host" || fd.timeout != 8 {
+		t.Fatalf("code %d out %q err %q host %q timeout %v", code, out, errText, fd.host, fd.timeout)
+	}
+}
+
+func TestVolumeTimeoutFlagAfterCommandOverridesConfig(t *testing.T) {
+	t.Setenv("WIIM_HOST", "")
+	fd, done := withFake(t)
+	defer done()
+	cfgPath := t.TempDir() + "/config.json"
+	if err := os.WriteFile(cfgPath, []byte(`{"defaultHost":"cfg-host","timeout":2,"maxVolume":55}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errText := runTest("volume", "30", "--config", cfgPath, "--timeout", "10")
+	if code != 0 || fd.timeout != 10 {
+		t.Fatalf("code %d err %q timeout %v", code, errText, fd.timeout)
+	}
+}
+
+func TestVolumeHelpDoesNotCreateClient(t *testing.T) {
+	created := false
+	old := newDevice
+	newDevice = func(_ string, _ float64) device { created = true; return &fakeDevice{} }
+	defer func() { newDevice = old }()
+	for _, help := range []string{"-h", "--help"} {
+		code, out, errText := runTest("volume", help)
+		if code != 0 || !strings.Contains(out, "get or set volume") {
+			t.Fatalf("%s: code %d out %q err %q", help, code, out, errText)
+		}
+	}
+	if created {
+		t.Fatal("created client during volume help")
+	}
+}
+
+func TestValidation(t *testing.T) {
+	if _, _, err := parseVolume("+abc"); err == nil {
+		t.Fatal("expected relative volume error")
+	}
+	if _, _, err := parseVolume("101"); err == nil {
+		t.Fatal("expected absolute volume error")
+	}
+	code, _, errText := runTest("status", "--host", "https://bad")
+	if code != 2 || !strings.Contains(errText, "host must be") {
+		t.Fatalf("code %d err %s", code, errText)
+	}
+	code, _, errText = runTest("status", "--timeout", "0")
+	if code != 2 || !strings.Contains(errText, "timeout must be") {
+		t.Fatalf("code %d err %s", code, errText)
+	}
+}
+
+func TestInputShowAndSwitch(t *testing.T) {
+	fd, done := withFake(t)
+	defer done()
+	code, out, _ := runTest("--host", "host", "input")
+	if code != 0 || strings.TrimSpace(out) != "hdmi" {
+		t.Fatalf("code %d out %q", code, out)
+	}
+	code, out, _ = runTest("--host", "host", "input", "arc")
+	if code != 0 || !strings.Contains(out, "hdmi") || fd.calls[len(fd.calls)-1] != "input:hdmi" {
+		t.Fatalf("code %d out %q calls %#v", code, out, fd.calls)
+	}
+}
+
+func TestURLPresetAndTransportCommands(t *testing.T) {
+	fd, done := withFake(t)
+	defer done()
+	code, out, _ := runTest("--host", "host", "play-url", "https://example.com/a.mp3")
+	if code != 0 || !strings.Contains(out, "Sent URL") || fd.calls[0] != "play-url:https://example.com/a.mp3" {
+		t.Fatalf("code %d out %s calls %#v", code, out, fd.calls)
+	}
+	code, _, errText := runTest("--host", "host", "play-url", "file:///tmp/a.mp3")
+	if code != 2 || !strings.Contains(errText, "absolute http") {
+		t.Fatalf("code %d err %s", code, errText)
+	}
+	code, _, _ = runTest("--host", "host", "next")
+	if code != 0 || fd.calls[len(fd.calls)-1] != "playback:next" {
+		t.Fatalf("calls %#v", fd.calls)
+	}
+	code, _, _ = runTest("--host", "host", "preset", "play", "1")
+	if code != 0 || fd.calls[len(fd.calls)-1] != "preset" {
+		t.Fatalf("calls %#v", fd.calls)
+	}
+}
+
+func TestRawOutputsJSONAndEnvHost(t *testing.T) {
+	fd, done := withFake(t)
+	defer done()
+	t.Setenv("WIIM_HOST", "env-host")
+	code, out, _ := runTest("raw", "getStatusEx")
+	if code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	if !strings.Contains(out, "getStatusEx") || len(fd.calls) != 1 {
+		t.Fatalf("out %s calls %#v", out, fd.calls)
+	}
+}
+
+func TestSetupAndConfigSet(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	code, out, errText := runTest("--config", path, "setup", "--host", "wiim.local")
+	if code != 0 || !strings.Contains(out, "Wrote config") {
+		t.Fatalf("code %d out %s err %s", code, out, errText)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"defaultHost": "wiim.local"`) || !strings.Contains(string(data), `"maxVolume": 55`) {
+		t.Fatalf("config %s", data)
+	}
+	code, _, errText = runTest("--config", path, "config", "set", "maxVolume", "70")
+	if code != 0 {
+		t.Fatalf("code %d err %s", code, errText)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil || cfg.MaxVolume != 70 {
+		t.Fatalf("cfg %#v err %v", cfg, err)
+	}
+	code, out, _ = runTest("--config", path, "config", "path")
+	if code != 0 || strings.TrimSpace(out) != path {
+		t.Fatalf("code %d path out %q", code, out)
+	}
+	code, _, errText = runTest("--config", path, "config", "unset", "defaultHost")
+	if code != 0 {
+		t.Fatalf("code %d err %s", code, errText)
+	}
+	cfg, _ = LoadConfig(path)
+	if cfg.DefaultHost != "" {
+		t.Fatalf("defaultHost should be unset: %#v", cfg)
+	}
+}
+
+func TestResolveHostFromConfig(t *testing.T) {
+	t.Setenv("WIIM_HOST", "")
+	tmp := t.TempDir() + "/config.json"
+	if err := os.WriteFile(tmp, []byte(`{"defaultHost":"cfg-host","timeout":2}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := ResolveHost("", cfg)
+	if err != nil || host != "cfg-host" {
+		t.Fatalf("host %s err %v", host, err)
+	}
+}

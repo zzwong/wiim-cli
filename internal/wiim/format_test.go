@@ -1,0 +1,258 @@
+package wiim
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func TestNormalizeStatusCombinesSources(t *testing.T) {
+	status := NormalizeStatus("192.0.2.10", map[string]any{"project": "WiiM_Ultra", "firmware": "fw", "internet": "1", "RSSI": "-62", "wlanFreq": "5", "wlanSnr": "28"}, map[string]any{"vol": "38", "mute": "0", "status": "stop"}, map[string]any{"name": "WiiM Ultra"})
+	if status.Name != "WiiM Ultra" || status.Host != "192.0.2.10" || status.Model != "WiiM_Ultra" {
+		t.Fatalf("status %#v", status)
+	}
+	if status.Online == nil || !*status.Online {
+		t.Fatalf("online %#v", status.Online)
+	}
+	if status.Volume == nil || *status.Volume != 38 {
+		t.Fatalf("volume %#v", status.Volume)
+	}
+	if status.Muted == nil || *status.Muted {
+		t.Fatalf("muted %#v", status.Muted)
+	}
+}
+
+func TestFormatStatusJSONAndHuman(t *testing.T) {
+	b := false
+	v := 10
+	status := Status{Name: "WiiM Ultra", Host: "h", WiFi: WiFi{Frequency: "5745"}, Volume: &v, Muted: &b, PlaybackState: "stop"}
+	text, err := FormatStatus(status, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["name"] != "WiiM Ultra" {
+		t.Fatalf("json %s", text)
+	}
+	human, _ := FormatStatus(status, false)
+	for _, want := range []string{"Name: WiiM Ultra", "Wi-Fi: 5 GHz, 5745 MHz", "Volume: 10", "Muted: no"} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("missing %s in %s", want, human)
+		}
+	}
+}
+
+func TestNormalizeNowPrefersMetaAndDecodesHex(t *testing.T) {
+	now := NormalizeNow(map[string]any{"status": "play", "vol": "20", "mute": "1", "Title": "486578", "Artist": "417274697374"}, map[string]any{"metaData": map[string]any{"title": "Meta Title", "artist": "Meta Artist", "sampleRate": "44100"}})
+	if now.Title != "Meta Title" || now.Artist != "Meta Artist" || now.SampleRate != "44100" {
+		t.Fatalf("now %#v", now)
+	}
+	if now.Volume == nil || *now.Volume != 20 {
+		t.Fatalf("volume %#v", now.Volume)
+	}
+	if now.Muted == nil || !*now.Muted {
+		t.Fatalf("muted %#v", now.Muted)
+	}
+}
+
+func TestNormalizeNowSuppressesUnknownMetadata(t *testing.T) {
+	now := NormalizeNow(map[string]any{"Title": "556E6B6E6F776E", "Artist": "417274697374"}, map[string]any{"metaData": map[string]any{"title": "unknow"}})
+	if now.Title != "" {
+		t.Fatalf("expected empty unknown title, got %q", now.Title)
+	}
+	if now.Artist != "Artist" {
+		t.Fatalf("expected decoded artist, got %q", now.Artist)
+	}
+}
+
+func TestFormatCastMediaInfoHumanAndJSON(t *testing.T) {
+	info := CastMediaInfo{App: "YouTube", PlayerState: "PLAYING", Title: "Song", Artist: "Singer", Album: "Album", ContentType: "video/mp4", ContentID: "abc123"}
+
+	// Human readable
+	human, err := FormatCastMediaInfo(info, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"App: YouTube", "State: PLAYING", "Title: Song", "Artist: Singer", "Album: Album", "Content type: video/mp4", "Content ID: abc123"} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("missing %q in human output: %s", want, human)
+		}
+	}
+
+	// Empty fields omitted
+	empty := CastMediaInfo{PlayerState: "IDLE"}
+	human, err = FormatCastMediaInfo(empty, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(human, "State: IDLE") || strings.Contains(human, "App:") {
+		t.Fatalf("unexpected output for empty info: %s", human)
+	}
+
+	// JSON
+	js, err := FormatCastMediaInfo(info, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(js), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["app"] != "YouTube" || decoded["title"] != "Song" {
+		t.Fatalf("json %s", js)
+	}
+}
+
+func TestFormatSpotifyDevicesActiveAndInactive(t *testing.T) {
+	// Inactive device — ensure no double space
+	inactive := map[string]any{"devices": []any{
+		map[string]any{"name": "Speaker", "id": "abc", "type": "speaker"},
+	}}
+	out, err := FormatSpotifyDevices(inactive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "  ") {
+		t.Fatalf("double space in inactive output: %q", out)
+	}
+	if !strings.Contains(out, "Speaker (speaker) abc") {
+		t.Fatalf("unexpected inactive output: %q", out)
+	}
+
+	// Active device
+	active := map[string]any{"devices": []any{
+		map[string]any{"name": "Living Room", "id": "xyz", "type": "speaker", "is_active": true},
+	}}
+	out, err = FormatSpotifyDevices(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Living Room (speaker) active xyz") {
+		t.Fatalf("unexpected active output: %q", out)
+	}
+
+	// Empty devices
+	empty := map[string]any{"devices": []any{}}
+	out, err = FormatSpotifyDevices(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "No Spotify devices found" {
+		t.Fatalf("unexpected empty output: %q", out)
+	}
+
+	// Non-map value falls through to FormatRaw
+	out, err = FormatSpotifyDevices("raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "raw" {
+		t.Fatalf("expected raw string, got %q", out)
+	}
+
+	// Missing devices key
+	missing := map[string]any{"foo": "bar"}
+	out, err = FormatSpotifyDevices(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "No Spotify devices found" {
+		t.Fatalf("unexpected missing output: %q", out)
+	}
+}
+
+func TestFormatPresets(t *testing.T) {
+	// With presets
+	presets := map[string]any{"preset_list": []any{
+		map[string]any{"number": "1", "name": "Radio One", "url": "http://stream.example.com/radio"},
+		map[string]any{"id": "2", "name": "Podcast"},
+		map[string]any{"number": "3"}, // unnamed, no URL
+	}}
+	out, err := FormatPresets(presets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "1: Radio One — http://stream.example.com/radio") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+	if !strings.Contains(out, "2: Podcast") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+	if !strings.Contains(out, "3: Unnamed") {
+		t.Fatalf("expected unnamed preset, got: %q", out)
+	}
+
+	// "unknow" URL should be suppressed
+	unknow := map[string]any{"preset_list": []any{
+		map[string]any{"number": "1", "name": "N", "url": "unknow"},
+	}}
+	out, err = FormatPresets(unknow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, " — ") {
+		t.Fatalf("should not include URL for 'unknow': %q", out)
+	}
+
+	// No presets
+	none := map[string]any{}
+	out, err = FormatPresets(none)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "No presets configured" {
+		t.Fatalf("expected no presets, got: %q", out)
+	}
+
+	// Non-map value
+	out, err = FormatPresets("text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "text" {
+		t.Fatalf("expected raw string, got: %q", out)
+	}
+}
+
+func TestDecodeHexTextEdgeCases(t *testing.T) {
+	// Empty string
+	if got := DecodeHexText(""); got != "" {
+		t.Fatalf("empty: got %q", got)
+	}
+
+	// Invalid hex — returns original
+	if got := DecodeHexText("not-hex"); got != "not-hex" {
+		t.Fatalf("invalid hex: got %q", got)
+	}
+
+	// Valid UTF-8
+	if got := DecodeHexText("48656c6c6f"); got != "Hello" {
+		t.Fatalf("valid hex: got %q", got)
+	}
+
+	// Odd-length hex (invalid)
+	if got := DecodeHexText("48656c6c6"); got != "48656c6c6" {
+		t.Fatalf("odd-length hex: got %q", got)
+	}
+
+	// Non-UTF-8 bytes (should still produce string)
+	got := DecodeHexText("80")
+	if len(got) != 1 || got[0] != 128 { // 0x80 is valid Go string byte
+		t.Fatalf("non-utf8 hex: got %q (len=%d)", got, len(got))
+	}
+}
+
+func TestFormatNowHumanHandlesMissingMetadata(t *testing.T) {
+	v := 5
+	m := false
+	text, err := FormatNow(Now{PlaybackState: "stop", Volume: &v, Muted: &m}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "State: stop") || !strings.Contains(text, "Volume: 5") {
+		t.Fatalf("text %s", text)
+	}
+}

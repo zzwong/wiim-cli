@@ -173,6 +173,21 @@ fetch it.
 Human-readable output by default; `--json` for scripting. Runtime/API errors exit `1`;
 validation/usage errors exit `2`.
 
+On failure, `--json` also changes what's printed to stderr: instead of a plain `wiim: <message>`
+line, you get a JSON error envelope so scripts don't have to string-match prose:
+
+```json
+{
+  "error": {
+    "kind": "usage",
+    "message": "volume must be between 0 and 100",
+    "exitCode": 2
+  }
+}
+```
+
+`kind` is `"usage"` (exit `2`) or `"runtime"` (exit `1`), matching the process exit code.
+
 ## Docs
 
 - [`docs/api.md`](docs/api.md) — WiiM/Linkplay API reference, endpoint mappings, verified

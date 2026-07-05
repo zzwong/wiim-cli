@@ -40,12 +40,17 @@ type device interface {
 var newDevice = func(host string, timeout float64) device { return NewClient(host, timeout) }
 
 // Run parses command-line arguments, loads configuration, connects to the WiiM
-// device, and dispatches the requested subcommand. It returns an error suitable
-// for ExitCode.
+// device, and dispatches the requested subcommand. On failure it writes the
+// error to stderr itself (as a JSON envelope if --json was requested, plain
+// text otherwise) and returns an error suitable for ExitCode.
 func Run(args []string, stdout, stderr io.Writer) error {
 	app := newApp(stdout, stderr)
 	app.root.SetArgs(args)
-	return app.root.Execute()
+	err := app.root.Execute()
+	if err != nil {
+		fmt.Fprintln(stderr, FormatError(err, app.opts.asJSON))
+	}
+	return err
 }
 
 type app struct {

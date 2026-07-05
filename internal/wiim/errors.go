@@ -1,6 +1,9 @@
 package wiim
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // UsageError represents an error caused by invalid user input or command syntax.
 // ExitCode returns 2 for usage errors.
@@ -31,4 +34,51 @@ func ExitCode(err error) int {
 		return 2
 	}
 	return 1
+}
+
+// errorKindAndMessage classifies err the same way ExitCode does, and returns
+// its message without the "wiim: " prefix used by Error() for human display.
+func errorKindAndMessage(err error) (kind, message string) {
+	switch e := err.(type) {
+	case UsageError:
+		return "usage", e.Msg
+	case RuntimeError:
+		return "runtime", e.Msg
+	default:
+		return "runtime", err.Error()
+	}
+}
+
+type errorEnvelope struct {
+	Error errorDetail `json:"error"`
+}
+
+type errorDetail struct {
+	Kind     string `json:"kind"`
+	Message  string `json:"message"`
+	ExitCode int    `json:"exitCode"`
+}
+
+// FormatError renders err for display on stderr: a plain "wiim: <message>"
+// string normally (unchanged from before --json errors existed), or a JSON
+// envelope when asJSON is true, so scripts/agents that requested --json get a
+// structured failure reason instead of prose they'd have to string-match.
+// Returns "" for a nil err.
+func FormatError(err error, asJSON bool) string {
+	if err == nil {
+		return ""
+	}
+	if !asJSON {
+		return err.Error()
+	}
+	kind, message := errorKindAndMessage(err)
+	out, marshalErr := json.MarshalIndent(errorEnvelope{Error: errorDetail{
+		Kind:     kind,
+		Message:  message,
+		ExitCode: ExitCode(err),
+	}}, "", "  ")
+	if marshalErr != nil {
+		return err.Error()
+	}
+	return string(out)
 }

@@ -103,6 +103,48 @@ func TestStatusJSONAllowsOptionsAfterCommand(t *testing.T) {
 	}
 }
 
+func TestRunWritesJSONErrorEnvelopeToStderr(t *testing.T) {
+	_, done := withFake(t)
+	defer done()
+	var out, errb bytes.Buffer
+	err := Run([]string{"--host", "1.2.3.4", "volume", "60", "--json"}, &out, &errb)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Fatalf("ExitCode = %d, want 2", code)
+	}
+	var envelope struct {
+		Error struct {
+			Kind     string `json:"kind"`
+			Message  string `json:"message"`
+			ExitCode int    `json:"exitCode"`
+		} `json:"error"`
+	}
+	if jsonErr := json.Unmarshal(errb.Bytes(), &envelope); jsonErr != nil {
+		t.Fatalf("stderr is not valid JSON: %v\nstderr: %s", jsonErr, errb.String())
+	}
+	if envelope.Error.Kind != "usage" || envelope.Error.ExitCode != 2 {
+		t.Fatalf("envelope = %+v", envelope)
+	}
+	if !strings.Contains(envelope.Error.Message, "maxVolume 55") {
+		t.Fatalf("message = %q", envelope.Error.Message)
+	}
+}
+
+func TestRunWritesPlainErrorToStderrWithoutJSON(t *testing.T) {
+	_, done := withFake(t)
+	defer done()
+	var out, errb bytes.Buffer
+	err := Run([]string{"--host", "1.2.3.4", "volume", "60"}, &out, &errb)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := strings.TrimSpace(errb.String()); got != err.Error() {
+		t.Fatalf("stderr = %q, want %q", got, err.Error())
+	}
+}
+
 func TestNow(t *testing.T) {
 	_, done := withFake(t)
 	defer done()

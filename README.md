@@ -1,6 +1,11 @@
 # wiim-cli
 
 [![CI](https://github.com/zzwong/wiim-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/zzwong/wiim-cli/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/zzwong/wiim-cli)](https://goreportcard.com/report/github.com/zzwong/wiim-cli)
+[![Go Reference](https://pkg.go.dev/badge/github.com/zzwong/wiim-cli.svg)](https://pkg.go.dev/github.com/zzwong/wiim-cli)
+[![Release](https://img.shields.io/github/v/release/zzwong/wiim-cli)](https://github.com/zzwong/wiim-cli/releases)
+[![Go 1.25+](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](https://go.dev/dl/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Small, scriptable Go CLI for inspecting and controlling a WiiM device on the local network.
 
@@ -28,62 +33,47 @@ Volume: 40
 
 ## Requirements
 
-- A **WiiM device** (Pro, Ultra, Mini, etc.) on the same LAN.
-- **Go 1.25+** — to install or build from source; not needed for prebuilt binaries.
-- **Linux keyring** (Secret Service / GNOME Keyring or KWallet) — only for `wiim spotify` commands; macOS uses Keychain automatically.
-- **playerctl** — only for `wiim cliamp` commands (Linux-only).
+- A **WiiM device** (Pro, Ultra, Mini, etc.) on the same LAN. Other Linkplay-based streamers
+  (Arylic, Audio Pro, etc.) share the same API and likely work too — see
+  [Compatibility](docs/api.md#compatibility) for what's actually verified.
+- **Go 1.25+** to build from source; not needed for prebuilt binaries.
+- **Linux keyring** (Secret Service / GNOME Keyring or KWallet) for `wiim spotify` commands; macOS uses Keychain automatically.
+- **playerctl** for `wiim cliamp` commands (Linux only).
 
 ## Install
 
-Prebuilt binaries for Linux, macOS, and Windows are on the [Releases page](https://github.com/zzwong/wiim-cli/releases). With a Go toolchain:
+Prebuilt binaries for Linux, macOS, and Windows are on the [Releases page](https://github.com/zzwong/wiim-cli/releases).
+
+With a Go toolchain:
 
 ```bash
 go install github.com/zzwong/wiim-cli/cmd/wiim@latest
 ```
 
-Or build from source as described below.
-
-## Build / run from source
+Or build from source:
 
 ```bash
-# One-off development runs
-go run ./cmd/wiim --help
-
-# Normal build
 git clone https://github.com/zzwong/wiim-cli.git
 cd wiim-cli
-make build           # writes ./wiim
-./wiim --host <host> status
-
-# Day-to-day use
-make install
-wiim status
+make build      # writes ./wiim
+make install    # or: go install ./cmd/wiim
 ```
 
-`make build` and `make install` embed `git describe --tags --always --dirty` into `wiim version`. Untagged builds show the commit hash; dirty builds include `-dirty`.
+`make build`/`make install` embed `git describe --tags --always --dirty` into `wiim version`. Untagged builds show the commit hash; dirty builds add `-dirty`.
 
 ## Configuration
 
-Host resolution order:
-
-1. `--host` flag
-2. `WIIM_HOST` environment variable
-3. `~/.config/wiim-cli/config.json` key `defaultHost`
-4. No fallback — host is required
-
-Initialize config:
+Host resolution order: `--host` flag → `WIIM_HOST` env var → `defaultHost` in
+`~/.config/wiim-cli/config.json` → error (host is required).
 
 ```bash
-wiim setup --host <wiim-host>
+wiim setup --host <wiim-host>              # writes defaultHost to config
 wiim config show
-wiim config set defaultHost <wiim-host>
 wiim config set maxVolume 55
 wiim config set spotifyRedirectURI http://127.0.0.1:19872/login
-wiim config path
 wiim config unset spotifyRedirectURI
+wiim config path
 ```
-
-Config example:
 
 ```json
 {
@@ -94,38 +84,47 @@ Config example:
 }
 ```
 
-`maxVolume` defaults to `55` and is enforced for absolute volume sets and relative volume increases.
+`maxVolume` (default `55`) caps absolute volume sets and relative volume increases.
 
 ## Commands
 
 ```bash
+# Status
 wiim status
 wiim --json status
 wiim now
 wiim cast-now
-wiim input
-wiim input hdmi
-wiim volume
-wiim volume 30
-wiim volume +5
-wiim volume -5
-wiim mute
-wiim unmute
+
+# Playback
 wiim play
 wiim pause
 wiim stop
 wiim next
 wiim prev
 wiim seek 30
+wiim clear
+
+# Volume
+wiim volume
+wiim volume 30
+wiim volume +5
+wiim volume -5
+wiim mute
+wiim unmute
+
+# Input & presets
+wiim input
+wiim input hdmi
+wiim preset list
+wiim preset play 1
+
+# Play media
 wiim play-url https://example.com/song.mp3
 wiim play-m3u https://example.com/station.m3u
 wiim prompt-url https://example.com/alert.mp3
 wiim play-file ./song.flac
-wiim clear
-wiim preset list
-wiim preset play 1
-wiim cliamp status          # Linux only — requires playerctl
-wiim cliamp handoff         # Linux only — requires playerctl
+
+# Spotify Connect
 wiim spotify credentials set
 wiim spotify credentials set-secret
 wiim spotify credentials import-clipboard id
@@ -137,51 +136,64 @@ wiim spotify logout
 wiim spotify devices [--reauth]
 wiim spotify transfer <spotify-device-id> [--no-play] [--reauth]
 wiim spotify play spotify:playlist:<id> [spotify-device-id] [--reauth]
-wiim version
+
+# cliamp (Linux, requires playerctl)
+wiim cliamp status
+wiim cliamp handoff
+
+# Utility
 wiim raw getStatusEx
+wiim version
 wiim completion bash        # also: fish, zsh, powershell
 ```
 
-Global options (`--host`, `--timeout`, `--config`, `--json`) can appear before or after the command. Normal use should prefer config; `--host` is primarily an override for scripts/testing.
+Global options (`--host`, `--timeout`, `--config`, `--json`) work before or after the
+command. Prefer config for daily use; `--host` is mainly an override for scripts/testing.
 
-**Spotify commands** use the Spotify Web API. Store your client ID/secret in the OS keychain, then login:
+**Spotify** — store credentials once, then log in:
 
 ```bash
-wiim spotify credentials set        # prompts for both ID and secret
-wiim spotify credentials set-secret # prompts for secret only (if ID already stored)
+wiim spotify credentials set   # prompts for client ID and secret
 wiim spotify login
 ```
 
-For clipboard imports, use explicit commands so the CLI never guesses whether clipboard contents are an ID or a secret:
+Clipboard imports use explicit `id`/`secret` subcommands so the CLI never guesses which is
+which. Tokens live in the OS keychain and refresh automatically; add `--reauth` to a Spotify
+command to relaunch the browser login flow if refresh fails. The default redirect URI is
+`http://127.0.0.1:19872/login` — override with config `spotifyRedirectURI` or env
+`WIIM_SPOTIFY_REDIRECT_URI`. See [`docs/security.md`](docs/security.md) for storage details.
 
-```bash
-wiim spotify credentials import-clipboard id
-wiim spotify credentials import-clipboard secret
-```
+**cliamp** bridges `playerctl -p cliamp` (MPRIS) to WiiM. `handoff` only works for
+HTTP/HTTPS URLs — use `play-file` for local files and Spotify Connect for Spotify.
 
-The default redirect URI is `http://127.0.0.1:19872/login`; configure that in the Spotify developer app, or set `spotifyRedirectURI` / `WIIM_SPOTIFY_REDIRECT_URI` if you prefer a different loopback port/path. Tokens are stored in the OS keychain and refreshed automatically. If refresh fails, the stale token is cleared and the command tells you to reauthorize; add `--reauth` to Spotify playback commands to launch the browser login flow automatically and retry. `WIIM_SPOTIFY_TOKEN` or `SPOTIFY_TOKEN` can still override the token for one-off use. See [`docs/security.md`](docs/security.md) for secret storage notes.
-
-**cliamp commands** use `playerctl -p cliamp` on Linux. `cliamp handoff` can send HTTP/HTTPS URLs exposed by cliamp over MPRIS to WiiM. Local files should use `play-file`; Spotify should use the Spotify Connect commands.
-
-**play-file** starts a local HTTP file server and runs until stopped so the WiiM can fetch the file.
-
-WiiM HTTP API calls use HTTPS with certificate verification disabled, which is expected for LAN devices with self-signed or invalid certificates. Cast info is read from `http://<host>:8008/setup/eureka_info`.
-
-## API notes
-
-See [`docs/api.md`](docs/api.md) for WiiM/Linkplay API references, endpoint mappings, verified fields, and quirks.
+**play-file** serves the given file over a local HTTP server until stopped, so the WiiM can
+fetch it.
 
 ## Output and errors
 
-Human-readable output is the default. Use `--json` for normalized JSON where useful. Runtime/API errors are printed to stderr with exit code `1`; validation/usage errors use exit code `2`.
+Human-readable output by default; `--json` for scripting. Runtime/API errors exit `1`;
+validation/usage errors exit `2`.
 
-## Tests
+## Docs
 
-Tests do not require a real WiiM device.
+- [`docs/api.md`](docs/api.md) — WiiM/Linkplay API reference, endpoint mappings, verified
+  fields, quirks, and device compatibility.
+- [`docs/security.md`](docs/security.md) — credential storage, OAuth token handling, LAN
+  file-serving exposure, and TLS caveats.
+
+## Contributing
 
 ```bash
-go test ./...
+go test ./...   # no real WiiM device required
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, linting, and PR guidelines, and
+[SECURITY.md](SECURITY.md) to report a vulnerability.
+
+## Acknowledgments
+
+This CLI was built directly from official WiiM and Arylic/Linkplay HTTP API documentation —
+see [Acknowledgments in `docs/api.md`](docs/api.md#acknowledgments) for the specific sources.
 
 ## License
 

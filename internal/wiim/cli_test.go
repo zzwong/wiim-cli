@@ -103,6 +103,128 @@ func TestStatusJSONAllowsOptionsAfterCommand(t *testing.T) {
 	}
 }
 
+func TestRunWritesJSONErrorEnvelopeToStderr(t *testing.T) {
+	_, done := withFake(t)
+	defer done()
+	var out, errb bytes.Buffer
+	err := Run([]string{"--host", "1.2.3.4", "volume", "60", "--json"}, &out, &errb)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Fatalf("ExitCode = %d, want 2", code)
+	}
+	var envelope struct {
+		Error struct {
+			Kind     string `json:"kind"`
+			Message  string `json:"message"`
+			ExitCode int    `json:"exitCode"`
+		} `json:"error"`
+	}
+	if jsonErr := json.Unmarshal(errb.Bytes(), &envelope); jsonErr != nil {
+		t.Fatalf("stderr is not valid JSON: %v\nstderr: %s", jsonErr, errb.String())
+	}
+	if envelope.Error.Kind != "usage" || envelope.Error.ExitCode != 2 {
+		t.Fatalf("envelope = %+v", envelope)
+	}
+	if !strings.Contains(envelope.Error.Message, "maxVolume 55") {
+		t.Fatalf("message = %q", envelope.Error.Message)
+	}
+}
+
+func TestRunWritesPlainErrorToStderrWithoutJSON(t *testing.T) {
+	_, done := withFake(t)
+	defer done()
+	var out, errb bytes.Buffer
+	err := Run([]string{"--host", "1.2.3.4", "volume", "60"}, &out, &errb)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := strings.TrimSpace(errb.String()); got != err.Error() {
+		t.Fatalf("stderr = %q, want %q", got, err.Error())
+	}
+}
+
+func decodeErrorEnvelope(t *testing.T, stderr []byte) (kind, message string, exitCode int) {
+	t.Helper()
+	var envelope struct {
+		Error struct {
+			Kind     string `json:"kind"`
+			Message  string `json:"message"`
+			ExitCode int    `json:"exitCode"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stderr, &envelope); err != nil {
+		t.Fatalf("stderr is not valid JSON: %v\nstderr: %s", err, stderr)
+	}
+	return envelope.Error.Kind, envelope.Error.Message, envelope.Error.ExitCode
+}
+
+// TestRunHonorsJSONRegardlessOfArgOrder guards against a real bug found in
+// review: the hand-rolled volume flag parser (DisableFlagParsing) returns on
+// the first bad token, so --json only took effect if it appeared before
+// whatever triggered the error. "volume --bogus --json" used to print plain
+// text even though --json was requested.
+func TestRunHonorsJSONRegardlessOfArgOrder(t *testing.T) {
+	_, done := withFake(t)
+	defer done()
+	var out, errb bytes.Buffer
+	err := Run([]string{"--host", "1.2.3.4", "volume", "--bogus", "--json"}, &out, &errb)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	kind, message, code := decodeErrorEnvelope(t, errb.Bytes())
+	if kind != "usage" || code != 2 || !strings.Contains(message, "unknown volume option") {
+		t.Fatalf("kind=%q message=%q code=%d", kind, message, code)
+	}
+}
+
+// TestRunHonorsJSONForCobraNativeErrors guards against a related gap: an
+// unresolvable command or an unknown flag on a normal (non-volume) command
+// makes cobra/pflag abort before persistent flags — including --json — are
+// ever bound, so app.opts.asJSON stays false regardless of arg order. Both
+// are common typo shapes a script could easily hit.
+func TestRunHonorsJSONForCobraNativeErrors(t *testing.T) {
+	_, done := withFake(t)
+	defer done()
+
+	var out, errb bytes.Buffer
+	err := Run([]string{"bogus", "--json"}, &out, &errb)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if _, _, code := decodeErrorEnvelope(t, errb.Bytes()); code != 1 {
+		t.Fatalf("unknown command: exit code = %d, want 1", code)
+	}
+
+	out.Reset()
+	errb.Reset()
+	err = Run([]string{"status", "--bogus", "--json"}, &out, &errb)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if _, _, code := decodeErrorEnvelope(t, errb.Bytes()); code != 1 {
+		t.Fatalf("unknown flag: exit code = %d, want 1", code)
+	}
+}
+
+// TestRunDoesNotTreatJSONAfterDashDashAsARequest ensures the raw-args
+// fallback respects "--" as ending flag parsing, same as the volume parser:
+// a literal "--json" positional value shouldn't be misread as a JSON output
+// request.
+func TestRunDoesNotTreatJSONAfterDashDashAsARequest(t *testing.T) {
+	_, done := withFake(t)
+	defer done()
+	var out, errb bytes.Buffer
+	err := Run([]string{"--host", "1.2.3.4", "play-url", "--", "--json"}, &out, &errb)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := strings.TrimSpace(errb.String()); got != err.Error() {
+		t.Fatalf("stderr = %q, want plain text %q (should not be JSON)", got, err.Error())
+	}
+}
+
 func TestNow(t *testing.T) {
 	_, done := withFake(t)
 	defer done()

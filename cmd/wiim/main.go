@@ -5,7 +5,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/zzwong/wiim-cli/internal/wiim"
@@ -13,7 +12,6 @@ import (
 
 func main() {
 	if err := wiim.Run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
 		os.Exit(wiim.ExitCode(err))
 	}
 }

@@ -17,6 +17,7 @@ wiim --host <wiim-host> now
 wiim --host <wiim-host> cast-now
 wiim --host <wiim-host> input
 wiim --host <wiim-host> volume
+wiim --host <wiim-host> preset list
 ```
 
 Use JSON for automation:
@@ -43,12 +44,25 @@ wiim --host <wiim-host> pause
 wiim --host <wiim-host> stop
 wiim --host <wiim-host> next
 wiim --host <wiim-host> prev
+wiim --host <wiim-host> seek <seconds>
+wiim --host <wiim-host> clear
 wiim --host <wiim-host> play-url <url>
 wiim --host <wiim-host> play-m3u <url>
+wiim --host <wiim-host> prompt-url <url>
+wiim --host <wiim-host> play-file <path>
 wiim --host <wiim-host> preset play <n>
+wiim spotify play <spotify-uri-or-url> [device-id]
+wiim spotify transfer <spotify-device-id>
 ```
 
-`play-file <path>` starts a local HTTP server and runs until stopped.
+`spotify play`/`spotify transfer` start audio on the device just like `play-url` or
+`preset play` — the safety rule applies to them too, even though they go through Spotify
+Connect instead of the WiiM HTTP API.
+
+`play-file <path>` starts a local HTTP server and **blocks in the foreground until stopped**
+(Ctrl-C) — it does not return control after the WiiM starts playing. Do not run it and wait
+synchronously: launch it as a background/detached process, give it a timeout, or stop the
+process yourself once playback has started, or the invocation will hang indefinitely.
 
 ## Spotify / cliamp
 
@@ -60,6 +74,9 @@ wiim spotify login
 wiim spotify devices
 wiim spotify devices --reauth
 ```
+
+`spotify play` and `spotify transfer` are mutating (see above) and need explicit permission;
+the commands above are read-only/auth-only and safe to run first.
 
 Never print or reveal keychain secrets. `credentials status` masks client IDs and only reports whether secrets/tokens exist. See `docs/security.md`.
 

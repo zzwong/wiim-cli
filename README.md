@@ -1,7 +1,6 @@
 # wiim-cli
 
 [![CI](https://github.com/zzwong/wiim-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/zzwong/wiim-cli/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/zzwong/wiim-cli)](https://goreportcard.com/report/github.com/zzwong/wiim-cli)
 [![Go Reference](https://pkg.go.dev/badge/github.com/zzwong/wiim-cli.svg)](https://pkg.go.dev/github.com/zzwong/wiim-cli)
 [![Release](https://img.shields.io/github/v/release/zzwong/wiim-cli)](https://github.com/zzwong/wiim-cli/releases)
 [![Go 1.25+](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](https://go.dev/dl/)

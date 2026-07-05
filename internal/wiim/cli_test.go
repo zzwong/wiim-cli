@@ -103,6 +103,46 @@ func TestStatusJSONAllowsOptionsAfterCommand(t *testing.T) {
 	}
 }
 
+func TestDiscoverCommandHumanAndJSON(t *testing.T) {
+	done := withFakeDiscovery(t, []string{"10.0.0.1"}, map[string]*fakeDiscoveryDevice{
+		"10.0.0.1": {statusEx: map[string]any{"project": "WiiM_Ultra", "firmware": "fw1"}, cast: map[string]any{"name": "WiiM Ultra"}},
+	})
+	defer done()
+
+	code, out, errText := runTest("discover")
+	if code != 0 {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	if !strings.Contains(out, "Name: WiiM Ultra") || !strings.Contains(out, "Host: 10.0.0.1") {
+		t.Fatalf("unexpected human output: %q", out)
+	}
+
+	code, out, errText = runTest("--json", "discover")
+	if code != 0 {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	var devices []DiscoveredDevice
+	if err := json.Unmarshal([]byte(out), &devices); err != nil {
+		t.Fatalf("not valid JSON: %v: %s", err, out)
+	}
+	if len(devices) != 1 || devices[0].IP != "10.0.0.1" {
+		t.Fatalf("devices = %+v", devices)
+	}
+}
+
+func TestDiscoverCommandDoesNotRequireHost(t *testing.T) {
+	done := withFakeDiscovery(t, nil, nil)
+	defer done()
+
+	code, out, errText := runTest("discover")
+	if code != 0 {
+		t.Fatalf("discover should not require --host: code %d err %q", code, errText)
+	}
+	if !strings.Contains(out, "No devices found") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
 func TestNow(t *testing.T) {
 	_, done := withFake(t)
 	defer done()

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -97,6 +98,7 @@ func (a *app) addCommands() {
 		a.root.AddCommand(&cobra.Command{Use: cmdName + " " + spec.arg, Short: spec.short, Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error { return a.runDevice([]string{cmdName, args[0]}) }})
 	}
 	a.root.AddCommand(&cobra.Command{Use: "raw <command>", Short: "send a raw WiiM API command", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error { return a.runDevice([]string{"raw", args[0]}) }})
+	a.root.AddCommand(&cobra.Command{Use: "discover", Short: "find Linkplay/WiiM devices on the local network via SSDP", Args: cobra.NoArgs, RunE: a.runDiscover})
 	a.root.AddCommand(a.presetCommand())
 	a.root.AddCommand(a.cliampCommand())
 	a.root.AddCommand(a.spotifyCommand())
@@ -326,6 +328,27 @@ func (a *app) runSetup(_ *cobra.Command, _ []string) error {
 
 func (a *app) runVersion(_ *cobra.Command, _ []string) error {
 	fmt.Fprintln(a.stdout, Version)
+	return nil
+}
+
+// runDiscover doesn't go through runDevice: it doesn't target a single known
+// host at all, so --host/--config/config-file host resolution don't apply.
+// The global --timeout flag is repurposed here as "how long to wait for SSDP
+// responses" rather than a per-request HTTP timeout.
+func (a *app) runDiscover(_ *cobra.Command, _ []string) error {
+	timeout := a.opts.timeout
+	if timeout <= 0 {
+		timeout = 3.0
+	}
+	found, err := Discover(time.Duration(timeout * float64(time.Second)))
+	if err != nil {
+		return err
+	}
+	out, err := FormatDiscovered(found, a.opts.asJSON)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(a.stdout, out)
 	return nil
 }
 

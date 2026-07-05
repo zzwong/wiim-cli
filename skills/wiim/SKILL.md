@@ -7,11 +7,17 @@ description: Use this skill when operating this repository's WiiM CLI or control
 
 Known development device details should be configured in `~/.config/wiim-cli/config.json` with `wiim setup --host <wiim-host>` or temporarily overridden with `--host`. Do not assume a hardcoded host.
 
+If no host is configured and none was given, run `wiim discover` (no `--host` needed) before
+asking the user for one — it finds Linkplay/WiiM devices on the LAN via SSDP in a few
+seconds. It's read-only and safe to run unprompted; an empty result just means nothing
+answered, not an error.
+
 ## Safe first commands
 
 Run read-only commands before mutating anything:
 
 ```bash
+wiim discover
 wiim --host <wiim-host> status
 wiim --host <wiim-host> now
 wiim --host <wiim-host> cast-now

@@ -65,10 +65,27 @@ Useful fields observed:
 - `build_version`
 - `cast_build_revision`
 
+## Discovery
+
+`wiim discover` finds devices without needing a host in advance. It multicasts an SSDP
+`M-SEARCH` (`ST: upnp:rootdevice`) to `239.255.255.250:1900` and collects the source IP of
+every UDP reply — SSDP replies come back as unicast to the requester's ephemeral port, so
+this doesn't join the multicast group or parse `LOCATION`/description XML at all. Because
+`upnp:rootdevice` is answered by any UPnP device (smart TVs, printers, routers, not just
+Linkplay speakers), every responding IP is then validated with a direct `getStatusEx` call;
+only hosts that answer the WiiM HTTP API make it into the result. This validation step is
+also why `discover` works for any Linkplay device, not just WiiM — it doesn't check for a
+WiiM-specific signature, just that `getStatusEx` responds at all (see
+[Compatibility](#compatibility)).
+
+IPv6 isn't supported (IPv4 multicast only), and devices on a different subnet/VLAN than the
+CLI won't be found — SSDP multicast doesn't cross routed network boundaries.
+
 ## Commands used by this CLI
 
 | CLI command | API command(s) | Notes |
 | --- | --- | --- |
+| `wiim discover` | SSDP `M-SEARCH`, then `getStatusEx` per candidate | Finds devices on the LAN; see "Discovery" above. |
 | `wiim status` | `getStatusEx`, `getPlayerStatus`, Cast `eureka_info` | Combines device/network/player state. Cast lookup is best effort. |
 | `wiim now` | `getPlayerStatus`, `getMetaInfo` | Metadata from `getMetaInfo` is preferred; player title/artist/album may be hex encoded. `unknow`/`Unknown` is treated as missing metadata. |
 | `wiim cast-now` | Cast protocol on TLS port 8009 | Best-effort Google Cast media-session metadata query. Works only when an active Cast media session is exposed. |

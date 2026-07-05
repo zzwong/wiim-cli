@@ -25,28 +25,34 @@ func runtimef(format string, args ...any) error {
 	return RuntimeError{Msg: fmt.Sprintf(format, args...)}
 }
 
+// classifyError is the single source of truth for how an error maps to a
+// JSON-envelope kind, an exit code, and a display message without the
+// "wiim: " prefix Error() adds for human display. ExitCode and FormatError
+// both go through this so they can't independently drift on a new error type.
+//
+// Note: this only recognizes UsageError/RuntimeError by exact type, not by
+// errors.As/Unwrap — if either type is ever wrapped with fmt.Errorf("...: %w",
+// ...) elsewhere, it will fall through to the runtime/err.Error() default
+// below instead of being classified correctly. Nothing in this codebase
+// wraps them today.
+func classifyError(err error) (kind, message string, code int) {
+	switch e := err.(type) {
+	case UsageError:
+		return "usage", e.Msg, 2
+	case RuntimeError:
+		return "runtime", e.Msg, 1
+	default:
+		return "runtime", err.Error(), 1
+	}
+}
+
 // ExitCode maps an error to a process exit code: nil → 0, UsageError → 2, anything else → 1.
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	if _, ok := err.(UsageError); ok {
-		return 2
-	}
-	return 1
-}
-
-// errorKindAndMessage classifies err the same way ExitCode does, and returns
-// its message without the "wiim: " prefix used by Error() for human display.
-func errorKindAndMessage(err error) (kind, message string) {
-	switch e := err.(type) {
-	case UsageError:
-		return "usage", e.Msg
-	case RuntimeError:
-		return "runtime", e.Msg
-	default:
-		return "runtime", err.Error()
-	}
+	_, _, code := classifyError(err)
+	return code
 }
 
 type errorEnvelope struct {
@@ -71,11 +77,11 @@ func FormatError(err error, asJSON bool) string {
 	if !asJSON {
 		return err.Error()
 	}
-	kind, message := errorKindAndMessage(err)
+	kind, message, code := classifyError(err)
 	out, marshalErr := json.MarshalIndent(errorEnvelope{Error: errorDetail{
 		Kind:     kind,
 		Message:  message,
-		ExitCode: ExitCode(err),
+		ExitCode: code,
 	}}, "", "  ")
 	if marshalErr != nil {
 		return err.Error()

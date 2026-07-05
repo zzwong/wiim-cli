@@ -2,9 +2,22 @@
 
 This project uses the WiiM local HTTP API directly. The API is Linkplay-style and is exposed by WiiM devices on the LAN.
 
-## References
+## Compatibility
 
-Official/reference documentation:
+WiiM devices run on the Linkplay platform, and the commands this CLI sends (`getStatusEx`,
+`getPlayerStatus`, `setPlayerCmd:*`, etc.) are the shared Linkplay HTTP API documented by
+Arylic below, not something WiiM-specific. Other Linkplay-based streamers (Arylic, Audio Pro,
+and similar) very likely support the same status/playback/volume/input/preset commands.
+
+That said, this CLI has only been developed and verified against a WiiM Ultra — see
+"Verified WiiM Ultra behavior" below. Non-WiiM hardware is untested, and `cast-now`/Cast
+metadata specifically depends on the device also exposing Google Cast, which isn't
+guaranteed on every Linkplay device. If you run this against other Linkplay hardware,
+reports of what works (or doesn't) are welcome.
+
+## Acknowledgments
+
+This CLI's understanding of the API comes directly from the following official documentation:
 
 - WiiM Products HTTP API PDF: <https://www.wiimhome.com/pdf/HTTP%20API%20for%20WiiM%20Products.pdf>
 - WiiM Mini HTTP API PDF: <https://www.wiimhome.com/pdf/HTTP%20API%20for%20WiiM%20Mini.pdf>

@@ -14,6 +14,18 @@ make test
 make build
 ```
 
+## Testing
+
+Tests must not contact a real WiiM device, a real Spotify API, or any other real network
+service. Fake the WiiM/Spotify HTTP APIs with `httptest.NewServer`, and fake the Cast TLS
+protocol with `net.Pipe` (see `cast_test.go` for the pattern). Table-driven tests are the
+norm — most `_test.go` files follow `client_test.go`/`spotify_test.go` for the style to match.
+
+```bash
+go test ./...
+go test ./... -run TestVolume -v   # narrow to one test while iterating
+```
+
 ## Code style
 
 Run `gofmt` before committing. The CI pipeline enforces it:
@@ -25,13 +37,17 @@ gofmt -w .          # fix all files
 
 ## Linting
 
-This repo uses `golangci-lint`. Run it before opening a PR:
+This repo uses `golangci-lint` with `govet`, `staticcheck`, `errcheck`, `revive`, `misspell`,
+and `gosec` enabled (see `.golangci.yml`). Run it before opening a PR:
 
 ```bash
 golangci-lint run ./...
 ```
 
-The CI pipeline runs golangci-lint with the project configuration in `.golangci.yml`.
+The one standing exception is `gosec` rule `G402` (TLS certificate verification) under
+`internal/wiim/` — WiiM devices only ever present self-signed certificates on the LAN, so
+skipping verification there is deliberate, not an oversight. Don't silence a new `gosec`
+finding elsewhere without discussing it in the PR first.
 
 ## Before submitting a PR
 
@@ -39,7 +55,9 @@ The CI pipeline runs golangci-lint with the project configuration in `.golangci.
 2. Add tests for new functionality.
 3. Run `gofmt -w .` to format your code.
 4. Run `golangci-lint run ./...` and resolve any issues.
-5. Tests must not contact a real WiiM device or any real web APIs; use `httptest`, `net.Pipe`, or similar fakes.
+5. If you touched a WiiM/Linkplay API call, update `docs/api.md`.
+6. If you touched credential storage, token handling, or `play-file`'s LAN exposure,
+   update `docs/security.md`.
 
 ## Commit messages
 

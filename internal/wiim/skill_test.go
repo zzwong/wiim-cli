@@ -32,7 +32,7 @@ func TestSkillDocMentionsAllCommands(t *testing.T) {
 	collectCommandNames(a.root, names)
 
 	skillPath := filepath.Join("..", "..", "skills", "wiim", "SKILL.md")
-	content, err := os.ReadFile(skillPath)
+	content, err := os.ReadFile(skillPath) // #nosec G304 -- fixed repo-relative path, not user input
 	if err != nil {
 		t.Fatalf("reading %s: %v", skillPath, err)
 	}
@@ -40,16 +40,27 @@ func TestSkillDocMentionsAllCommands(t *testing.T) {
 
 	var missing []string
 	for name := range names {
-		pattern := `\b` + regexp.QuoteMeta(name) + `\b`
-		if !regexp.MustCompile(pattern).MatchString(text) {
+		if !mentionsCommandName(text, name) {
 			missing = append(missing, name)
 		}
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		t.Errorf("skills/wiim/SKILL.md does not mention these commands: %v\n"+
+		t.Fatalf("skills/wiim/SKILL.md does not mention these commands: %v\n"+
 			"Add them so an agent relying on the skill knows they exist, and — if they "+
 			"mutate device or account state — that they need explicit permission first.",
 			missing)
 	}
+}
+
+// mentionsCommandName reports whether name appears in text as a standalone
+// token. A plain \bname\b regex isn't enough: regexp word boundaries treat
+// "-" as a delimiter, so \bplay\b matches inside "play-url"/"play-m3u"/
+// "play-file" even though those are distinct commands from "play". Treating
+// "-" (and "_") as part of the "word" for boundary purposes avoids a
+// hyphenated sibling command silently satisfying the check for a shorter
+// command name that's actually undocumented.
+func mentionsCommandName(text, name string) bool {
+	pattern := `(^|[^A-Za-z0-9_-])` + regexp.QuoteMeta(name) + `($|[^A-Za-z0-9_-])`
+	return regexp.MustCompile(pattern).MatchString(text)
 }

@@ -95,6 +95,32 @@ func TestDiscoverFallsBackToSSIDWhenCastInfoHasNoName(t *testing.T) {
 	}
 }
 
+// TestSSDPMXNeverExceedsTheListenWindow guards against a real gap found in
+// review: MX used to be hardcoded to 2 regardless of the actual listen
+// timeout, so "wiim --timeout 1 discover" asked devices for a 2s reply
+// window but only listened for 1s — quietly dropping any reply that arrived
+// in the second half of the window it advertised.
+func TestSSDPMXNeverExceedsTheListenWindow(t *testing.T) {
+	cases := []struct {
+		timeout time.Duration
+		want    int
+	}{
+		{500 * time.Millisecond, 1}, // below 1s clamps up, not down to 0
+		{1 * time.Second, 1},
+		{3 * time.Second, 3},
+		{5 * time.Second, 5},
+		{30 * time.Second, 5}, // clamped down, not an unbounded MX
+	}
+	for _, tc := range cases {
+		if got := ssdpMX(tc.timeout); got != tc.want {
+			t.Errorf("ssdpMX(%v) = %d, want %d", tc.timeout, got, tc.want)
+		}
+		if got := ssdpMX(tc.timeout); time.Duration(got)*time.Second > tc.timeout && tc.timeout >= time.Second {
+			t.Errorf("ssdpMX(%v) = %d exceeds the listen window", tc.timeout, got)
+		}
+	}
+}
+
 func TestSSDPSearchCompletesWithoutErrorWhenNothingResponds(t *testing.T) {
 	// No WiiM/UPnP devices are expected on the network this test runs on, so
 	// this exercises the real socket/timeout path without asserting on any

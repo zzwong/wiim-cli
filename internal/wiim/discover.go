@@ -3,6 +3,7 @@ package wiim
 import (
 	"net"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -90,6 +91,23 @@ func validateDiscoveryCandidate(ip string) (DiscoveredDevice, bool) {
 	}, true
 }
 
+// ssdpMX picks the SSDP MX value (devices randomize their reply across
+// [0, MX] seconds) to advertise for a given listen timeout. It must not
+// exceed how long ssdpSearch is actually willing to listen, or replies from
+// a device that used the tail end of the advertised window would be quietly
+// dropped. Clamped to [1, 5]: 0 is meaningless, and >5 is more delay than
+// SSDP discovery conventionally asks for.
+func ssdpMX(timeout time.Duration) int {
+	mx := int(timeout / time.Second)
+	if mx < 1 {
+		return 1
+	}
+	if mx > 5 {
+		return 5
+	}
+	return mx
+}
+
 // ssdpSearch multicasts a single SSDP M-SEARCH request and collects the
 // source IP of every UDP response received before timeout elapses. It does
 // not join the multicast group or parse response bodies — SSDP replies come
@@ -108,10 +126,11 @@ func ssdpSearch(timeout time.Duration) ([]string, error) {
 	if err != nil {
 		return nil, runtimef("could not resolve the SSDP multicast address: %v", err)
 	}
+	mx := ssdpMX(timeout)
 	request := "M-SEARCH * HTTP/1.1\r\n" +
 		"HOST: " + ssdpMulticastAddr + "\r\n" +
 		"MAN: \"ssdp:discover\"\r\n" +
-		"MX: 2\r\n" +
+		"MX: " + strconv.Itoa(mx) + "\r\n" +
 		"ST: upnp:rootdevice\r\n\r\n"
 	if _, err := conn.WriteToUDP([]byte(request), dst); err != nil {
 		return nil, runtimef("could not send the SSDP discovery request: %v", err)
@@ -131,7 +150,13 @@ func ssdpSearch(timeout time.Duration) ([]string, error) {
 		}
 		_, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			break // read deadline hit; no more responses are coming
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				break // read deadline hit; no more responses are coming
+			}
+			if len(ips) == 0 {
+				return nil, runtimef("discovery socket read failed: %v", err)
+			}
+			break // keep whatever was already collected rather than discard it
 		}
 		ip := addr.IP.String()
 		if !seen[ip] {

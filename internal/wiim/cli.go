@@ -332,13 +332,20 @@ func (a *app) runVersion(_ *cobra.Command, _ []string) error {
 }
 
 // runDiscover doesn't go through runDevice: it doesn't target a single known
-// host at all, so --host/--config/config-file host resolution don't apply.
-// The global --timeout flag is repurposed here as "how long to wait for SSDP
-// responses" rather than a per-request HTTP timeout.
+// host at all, so --host/config-file host resolution don't apply. It does
+// still resolve --timeout the same way every other command does (flag →
+// config file's timeout → 3.0 default, with an explicit 0 rejected as a
+// usage error by ResolveTimeout) — repurposed here as "how long to wait for
+// SSDP responses" rather than a per-request HTTP timeout, but resolved
+// consistently rather than silently ignoring a configured default.
 func (a *app) runDiscover(_ *cobra.Command, _ []string) error {
-	timeout := a.opts.timeout
-	if timeout <= 0 {
-		timeout = 3.0
+	cfg, err := a.loadConfig()
+	if err != nil {
+		return err
+	}
+	timeout, err := ResolveTimeout(a.cliTimeout(), cfg)
+	if err != nil {
+		return err
 	}
 	found, err := Discover(time.Duration(timeout * float64(time.Second)))
 	if err != nil {

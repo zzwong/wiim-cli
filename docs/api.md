@@ -79,7 +79,17 @@ WiiM-specific signature, just that `getStatusEx` responds at all (see
 [Compatibility](#compatibility)).
 
 IPv6 isn't supported (IPv4 multicast only), and devices on a different subnet/VLAN than the
-CLI won't be found — SSDP multicast doesn't cross routed network boundaries.
+CLI won't be found — SSDP multicast doesn't cross routed network boundaries. On a multi-homed
+host (multiple network interfaces), the multicast request goes out whichever interface the OS
+default route picks; a device reachable only via a different, non-default interface won't be
+found even though it isn't technically cross-subnet.
+
+`--timeout` doubles as how long `discover` waits for SSDP replies (default `3.0`s, same
+resolution order as every other command: flag → config file's `timeout` → default). A very
+short `--timeout` can miss devices that delay their reply toward the end of the window the
+request itself advertises — the request's `MX` value is derived from `--timeout` (capped to
+`[1, 5]`) specifically so it never asks devices for a longer delay than the CLI is actually
+willing to wait out.
 
 ## Commands used by this CLI
 

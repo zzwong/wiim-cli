@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeDevice struct {
@@ -100,6 +101,90 @@ func TestStatusJSONAllowsOptionsAfterCommand(t *testing.T) {
 	}
 	if data["host"] != "1.2.3.4" || data["volume"].(float64) != 38 {
 		t.Fatalf("data %#v", data)
+	}
+}
+
+func TestDiscoverCommandHumanAndJSON(t *testing.T) {
+	done := withFakeDiscovery(t, []string{"10.0.0.1"}, map[string]*fakeDiscoveryDevice{
+		"10.0.0.1": {statusEx: map[string]any{"project": "WiiM_Ultra", "firmware": "fw1"}, cast: map[string]any{"name": "WiiM Ultra"}},
+	})
+	defer done()
+
+	code, out, errText := runTest("discover")
+	if code != 0 {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	if !strings.Contains(out, "Name: WiiM Ultra") || !strings.Contains(out, "Host: 10.0.0.1") {
+		t.Fatalf("unexpected human output: %q", out)
+	}
+
+	code, out, errText = runTest("--json", "discover")
+	if code != 0 {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	var devices []DiscoveredDevice
+	if err := json.Unmarshal([]byte(out), &devices); err != nil {
+		t.Fatalf("not valid JSON: %v: %s", err, out)
+	}
+	if len(devices) != 1 || devices[0].IP != "10.0.0.1" {
+		t.Fatalf("devices = %+v", devices)
+	}
+}
+
+func TestDiscoverCommandDoesNotRequireHost(t *testing.T) {
+	done := withFakeDiscovery(t, nil, nil)
+	defer done()
+
+	code, out, errText := runTest("discover")
+	if code != 0 {
+		t.Fatalf("discover should not require --host: code %d err %q", code, errText)
+	}
+	if !strings.Contains(out, "No devices found") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+// TestDiscoverCommandRespectsConfigFileTimeout guards against a real gap
+// found in review: runDiscover used to read a.opts.timeout directly instead
+// of going through the same cliTimeout()/ResolveTimeout() path every other
+// command uses, so a timeout configured in ~/.config/wiim-cli/config.json
+// was silently ignored for discover specifically.
+func TestDiscoverCommandRespectsConfigFileTimeout(t *testing.T) {
+	t.Setenv("WIIM_HOST", "")
+	var gotTimeout time.Duration
+	oldSearch := ssdpSearchFunc
+	ssdpSearchFunc = func(timeout time.Duration) ([]string, error) {
+		gotTimeout = timeout
+		return nil, nil
+	}
+	defer func() { ssdpSearchFunc = oldSearch }()
+
+	cfgPath := t.TempDir() + "/config.json"
+	if err := os.WriteFile(cfgPath, []byte(`{"timeout":7}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, errText := runTest("--config", cfgPath, "discover")
+	if code != 0 {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	if gotTimeout != 7*time.Second {
+		t.Fatalf("ssdpSearchFunc got timeout %v, want 7s from config file", gotTimeout)
+	}
+}
+
+// TestDiscoverCommandRejectsZeroTimeout guards against the same gap in the
+// other direction: an explicit --timeout 0 is a hard usage error everywhere
+// else (ResolveTimeout), but runDiscover used to silently substitute 3.0
+// instead of going through that same validation.
+func TestDiscoverCommandRejectsZeroTimeout(t *testing.T) {
+	t.Setenv("WIIM_HOST", "")
+	done := withFakeDiscovery(t, nil, nil)
+	defer done()
+
+	code, _, errText := runTest("--timeout", "0", "discover")
+	if code != 2 || !strings.Contains(errText, "timeout must be") {
+		t.Fatalf("code %d err %q", code, errText)
 	}
 }
 

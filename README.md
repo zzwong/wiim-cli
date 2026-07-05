@@ -62,6 +62,13 @@ make install    # or: go install ./cmd/wiim
 
 ## Configuration
 
+Don't know your device's hostname/IP yet? `wiim discover` finds it for you:
+
+```bash
+wiim discover           # SSDP scan of the local network, ~3s
+wiim --json discover
+```
+
 Host resolution order: `--host` flag → `WIIM_HOST` env var → `defaultHost` in
 `~/.config/wiim-cli/config.json` → error (host is required).
 
@@ -88,6 +95,10 @@ wiim config path
 ## Commands
 
 ```bash
+# Discovery
+wiim discover
+wiim --json discover
+
 # Status
 wiim status
 wiim --json status
@@ -148,6 +159,12 @@ wiim completion bash        # also: fish, zsh, powershell
 
 Global options (`--host`, `--timeout`, `--config`, `--json`) work before or after the
 command. Prefer config for daily use; `--host` is mainly an override for scripts/testing.
+
+**discover** doesn't take `--host` — it multicasts an SSDP search and only lists devices
+that also answer the WiiM HTTP API, so unrelated UPnP gear (TVs, printers, routers) on the
+same LAN is filtered out. `--timeout` (default `3.0`s) controls how long it waits for
+replies. See [Compatibility in `docs/api.md`](docs/api.md#compatibility) for which devices
+this can find.
 
 **Spotify** — store credentials once, then log in:
 

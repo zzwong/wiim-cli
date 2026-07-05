@@ -65,10 +65,37 @@ Useful fields observed:
 - `build_version`
 - `cast_build_revision`
 
+## Discovery
+
+`wiim discover` finds devices without needing a host in advance. It multicasts an SSDP
+`M-SEARCH` (`ST: upnp:rootdevice`) to `239.255.255.250:1900` and collects the source IP of
+every UDP reply — SSDP replies come back as unicast to the requester's ephemeral port, so
+this doesn't join the multicast group or parse `LOCATION`/description XML at all. Because
+`upnp:rootdevice` is answered by any UPnP device (smart TVs, printers, routers, not just
+Linkplay speakers), every responding IP is then validated with a direct `getStatusEx` call;
+only hosts that answer the WiiM HTTP API make it into the result. This validation step is
+also why `discover` works for any Linkplay device, not just WiiM — it doesn't check for a
+WiiM-specific signature, just that `getStatusEx` responds at all (see
+[Compatibility](#compatibility)).
+
+IPv6 isn't supported (IPv4 multicast only), and devices on a different subnet/VLAN than the
+CLI won't be found — SSDP multicast doesn't cross routed network boundaries. On a multi-homed
+host (multiple network interfaces), the multicast request goes out whichever interface the OS
+default route picks; a device reachable only via a different, non-default interface won't be
+found even though it isn't technically cross-subnet.
+
+`--timeout` doubles as how long `discover` waits for SSDP replies (default `3.0`s, same
+resolution order as every other command: flag → config file's `timeout` → default). A very
+short `--timeout` can miss devices that delay their reply toward the end of the window the
+request itself advertises — the request's `MX` value is derived from `--timeout` (capped to
+`[1, 5]`) specifically so it never asks devices for a longer delay than the CLI is actually
+willing to wait out.
+
 ## Commands used by this CLI
 
 | CLI command | API command(s) | Notes |
 | --- | --- | --- |
+| `wiim discover` | SSDP `M-SEARCH`, then `getStatusEx` per candidate | Finds devices on the LAN; see "Discovery" above. |
 | `wiim status` | `getStatusEx`, `getPlayerStatus`, Cast `eureka_info` | Combines device/network/player state. Cast lookup is best effort. |
 | `wiim now` | `getPlayerStatus`, `getMetaInfo` | Metadata from `getMetaInfo` is preferred; player title/artist/album may be hex encoded. `unknow`/`Unknown` is treated as missing metadata. |
 | `wiim cast-now` | Cast protocol on TLS port 8009 | Best-effort Google Cast media-session metadata query. Works only when an active Cast media session is exposed. |

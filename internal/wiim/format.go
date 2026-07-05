@@ -261,6 +261,37 @@ func FormatSpotifyDevices(value any) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
+// FormatDiscovered formats devices found by Discover as human-readable blocks
+// or as a JSON array. An empty slice is a normal "nothing found" result, not
+// an error, and is rendered as such (or as "[]" in JSON mode).
+func FormatDiscovered(devices []DiscoveredDevice, asJSON bool) (string, error) {
+	if asJSON {
+		if devices == nil {
+			devices = []DiscoveredDevice{}
+		}
+		data, err := json.Marshal(devices)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+	if len(devices) == 0 {
+		return "No devices found on the local network.", nil
+	}
+	var blocks []string
+	for _, d := range devices {
+		lines := []string{"Name: " + d.Name, "Host: " + d.IP}
+		if d.Model != "" {
+			lines = append(lines, "Model: "+d.Model)
+		}
+		if d.Firmware != "" {
+			lines = append(lines, "Firmware: "+d.Firmware)
+		}
+		blocks = append(blocks, strings.Join(lines, "\n"))
+	}
+	return strings.Join(blocks, "\n\n"), nil
+}
+
 // FormatRaw formats an arbitrary value: maps and slices are pretty-printed as JSON;
 // scalars are converted with fmt.Sprint.
 func FormatRaw(value any) (string, error) {

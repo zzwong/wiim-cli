@@ -164,6 +164,52 @@ func TestFormatSpotifyDevicesActiveAndInactive(t *testing.T) {
 	}
 }
 
+func TestFormatDiscoveredHumanAndJSON(t *testing.T) {
+	devices := []DiscoveredDevice{
+		{IP: "10.0.0.1", Name: "WiiM Ultra", Model: "WiiM_Ultra", Firmware: "fw1"},
+		{IP: "10.0.0.2", Name: "WiiM Mini"},
+	}
+
+	human, err := FormatDiscovered(devices, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(human, "Name: WiiM Ultra\nHost: 10.0.0.1\nModel: WiiM_Ultra\nFirmware: fw1") {
+		t.Fatalf("missing first device block: %q", human)
+	}
+	if !strings.Contains(human, "Name: WiiM Mini\nHost: 10.0.0.2") || strings.Contains(human, "Mini\nModel:") {
+		t.Fatalf("second device should omit empty Model/Firmware lines: %q", human)
+	}
+
+	js, err := FormatDiscovered(devices, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []DiscoveredDevice
+	if err := json.Unmarshal([]byte(js), &got); err != nil {
+		t.Fatalf("not valid JSON: %v: %s", err, js)
+	}
+	if len(got) != 2 || got[0].IP != "10.0.0.1" {
+		t.Fatalf("got = %+v", got)
+	}
+
+	emptyHuman, err := FormatDiscovered(nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyHuman != "No devices found on the local network." {
+		t.Fatalf("unexpected empty output: %q", emptyHuman)
+	}
+
+	emptyJSON, err := FormatDiscovered(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyJSON != "[]" {
+		t.Fatalf("empty JSON should be [], got %q", emptyJSON)
+	}
+}
+
 func TestFormatPresets(t *testing.T) {
 	// With presets
 	presets := map[string]any{"preset_list": []any{

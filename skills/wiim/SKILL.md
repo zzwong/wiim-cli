@@ -89,6 +89,25 @@ wiim cliamp handoff
 
 `cliamp handoff` only works directly for HTTP/HTTPS URLs. Local files need `play-file`; Spotify needs Spotify Connect commands.
 
+## Other commands
+
+Administrative commands that touch local config/keychain state, not device audio, so the
+playback safety rule above doesn't apply to them — but still confirm before clearing
+someone's stored credentials:
+
+```bash
+wiim version
+wiim config show
+wiim config path
+wiim config set <key> <value>
+wiim config unset <key>
+wiim spotify credentials set
+wiim spotify credentials set-secret
+wiim spotify credentials import-clipboard <id|secret>
+wiim spotify credentials clear
+wiim spotify logout
+```
+
 ## Troubleshooting
 
 - Connection refused on plain HTTP port 80 is expected for the WiiM API; use the CLI's HTTPS API path.

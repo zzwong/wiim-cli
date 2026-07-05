@@ -41,12 +41,43 @@ type device interface {
 var newDevice = func(host string, timeout float64) device { return NewClient(host, timeout) }
 
 // Run parses command-line arguments, loads configuration, connects to the WiiM
-// device, and dispatches the requested subcommand. It returns an error suitable
-// for ExitCode.
+// device, and dispatches the requested subcommand. On failure it writes the
+// error to stderr itself (as a JSON envelope if --json was requested, plain
+// text otherwise) and returns an error suitable for ExitCode.
 func Run(args []string, stdout, stderr io.Writer) error {
 	app := newApp(stdout, stderr)
 	app.root.SetArgs(args)
-	return app.root.Execute()
+	err := app.root.Execute()
+	if err != nil {
+		// app.opts.asJSON only reflects a --json the parser actually reached
+		// before failing: an unresolvable command or an unknown flag makes
+		// cobra/pflag abort before persistent flags are bound at all, and the
+		// hand-rolled volume flag parser (DisableFlagParsing) returns on the
+		// first bad token, before it necessarily reaches a later --json. Both
+		// are common typo shapes, so fall back to scanning the raw args for a
+		// bare --json anywhere before a "--" terminator, matching what the
+		// volume parser treats as ending flag parsing.
+		fmt.Fprintln(stderr, FormatError(err, app.opts.asJSON || argsRequestJSON(args)))
+	}
+	return err
+}
+
+// argsRequestJSON reports whether a bare --json appears anywhere in args
+// before a "--" argument terminator (after "--", tokens are positional
+// values, not flags). It does not recognize --json=true/--json=false — this
+// is only a best-effort fallback for formatting an error that occurred
+// before normal flag binding got a chance to see --json; successful/typo-free
+// invocations are handled entirely by the real --json persistent flag.
+func argsRequestJSON(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "--json" {
+			return true
+		}
+	}
+	return false
 }
 
 type app struct {

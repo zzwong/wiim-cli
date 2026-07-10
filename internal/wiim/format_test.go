@@ -302,3 +302,47 @@ func TestFormatNowHumanHandlesMissingMetadata(t *testing.T) {
 		t.Fatalf("text %s", text)
 	}
 }
+
+func TestFormatDeviceProfilesHumanAndJSON(t *testing.T) {
+	cfg := Config{
+		DefaultDevice: "office",
+		Devices: map[string]DeviceProfile{
+			"zulu":   {Host: "zulu-host"},
+			"office": {Host: "office-host"},
+			"alpha":  {Host: "alpha-host"},
+		},
+	}
+
+	human, err := FormatDeviceProfiles(cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHuman := "NAME\tHOST\tDEFAULT\nalpha\talpha-host\t\noffice\toffice-host\t*\nzulu\tzulu-host\t"
+	if human != wantHuman {
+		t.Fatalf("human output = %q, want %q", human, wantHuman)
+	}
+
+	jsonOutput, err := FormatDeviceProfiles(cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := `[{"name":"alpha","host":"alpha-host","default":false},{"name":"office","host":"office-host","default":true},{"name":"zulu","host":"zulu-host","default":false}]`
+	if jsonOutput != wantJSON {
+		t.Fatalf("JSON output = %q, want %q", jsonOutput, wantJSON)
+	}
+
+	emptyHuman, err := FormatDeviceProfiles(Config{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyHuman != "No saved devices." {
+		t.Fatalf("empty human output = %q", emptyHuman)
+	}
+	emptyJSON, err := FormatDeviceProfiles(Config{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyJSON != "[]" {
+		t.Fatalf("empty JSON output = %q, want []", emptyJSON)
+	}
+}

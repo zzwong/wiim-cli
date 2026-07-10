@@ -16,6 +16,7 @@ import (
 
 type options struct {
 	host    string
+	device  string
 	timeout float64
 	config  string
 	asJSON  bool
@@ -143,6 +144,7 @@ func newApp(stdout, stderr io.Writer) *app {
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.PersistentFlags().StringVar(&a.opts.host, "host", "", "WiiM host or IP address; setup saves it as defaultHost")
+	root.PersistentFlags().StringVar(&a.opts.device, "device", "", "named WiiM device profile")
 	a.timeoutFlag = &timeoutValue{destination: &a.opts.timeout}
 	root.PersistentFlags().Var(a.timeoutFlag, "timeout", "request timeout in seconds")
 	root.PersistentFlags().StringVar(&a.opts.config, "config", "", "path to config JSON")
@@ -211,6 +213,18 @@ func (a *app) runVolumeCommand(cmd *cobra.Command, args []string) error {
 		}
 		if parseFlags && strings.HasPrefix(arg, "--host=") {
 			a.opts.host = strings.TrimPrefix(arg, "--host=")
+			continue
+		}
+		if parseFlags && strings.HasPrefix(arg, "--device=") {
+			a.opts.device = strings.TrimPrefix(arg, "--device=")
+			continue
+		}
+		if parseFlags && arg == "--device" {
+			if i+1 >= len(args) {
+				return usagef("flag --device requires a value")
+			}
+			i++
+			a.opts.device = args[i]
 			continue
 		}
 		if parseFlags && arg == "--host" {
@@ -369,7 +383,7 @@ func (a *app) runDevice(args []string) error {
 	if err != nil {
 		return err
 	}
-	host, err := ResolveHost(a.opts.host, cfg)
+	host, err := ResolveHost(a.opts.host, a.opts.device, cfg)
 	if err != nil {
 		return err
 	}
@@ -522,8 +536,8 @@ func (a *app) runConfigSet(_ *cobra.Command, args []string) error {
 	key, value := args[0], args[1]
 	switch key {
 	case "defaultHost", "host":
-		if !hostPattern.MatchString(value) {
-			return usagef("host must be a hostname or IP address, not a URL")
+		if err := ValidateHost(value); err != nil {
+			return err
 		}
 		cfg.DefaultHost = value
 	case "timeout":

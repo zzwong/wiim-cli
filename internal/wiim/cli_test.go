@@ -664,7 +664,7 @@ func TestResolveHostFromConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := ResolveHost("", cfg)
+	host, err := ResolveHost("", "", cfg)
 	if err != nil || host != "cfg-host" {
 		t.Fatalf("host %s err %v", host, err)
 	}

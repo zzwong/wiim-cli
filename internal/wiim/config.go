@@ -20,12 +20,19 @@ const (
 
 var userHomeDir = os.UserHomeDir
 
+// DeviceProfile holds the connection settings for a named WiiM device.
+type DeviceProfile struct {
+	Host string `json:"host"`
+}
+
 // Config holds persistent settings for connecting to a WiiM device.
 type Config struct {
-	DefaultHost        string  `json:"defaultHost"`
-	Timeout            float64 `json:"timeout"`
-	SpotifyRedirectURI string  `json:"spotifyRedirectURI"`
-	MaxVolume          int     `json:"maxVolume"`
+	DefaultHost        string                   `json:"defaultHost"`
+	Timeout            float64                  `json:"timeout"`
+	SpotifyRedirectURI string                   `json:"spotifyRedirectURI"`
+	MaxVolume          int                      `json:"maxVolume"`
+	DefaultDevice      string                   `json:"defaultDevice,omitempty"`
+	Devices            map[string]DeviceProfile `json:"devices,omitempty"`
 }
 
 // ConfigPath returns the config file path. If path is non-empty it is used as-is;
@@ -102,26 +109,70 @@ func jsonNumberHasNonzeroMantissa(value string) bool {
 	return false
 }
 
-var hostPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var (
+	hostPattern       = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	deviceNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+)
+
+// ValidateDeviceName validates a name used as a key in Config.Devices.
+func ValidateDeviceName(name string) error {
+	if !deviceNamePattern.MatchString(name) {
+		return usagef("device name must contain only letters, numbers, '.', '_', or '-'")
+	}
+	return nil
+}
+
+// ValidateHost validates a WiiM hostname or IP address without consulting
+// process state such as environment variables or configuration.
+func ValidateHost(host string) error {
+	if !hostPattern.MatchString(host) {
+		return usagef("host must be a hostname or IP address, not a URL")
+	}
+	return nil
+}
 
 // ResolveHost returns the WiiM hostname from (in order of precedence) the CLI
-// argument, the WIIM_HOST environment variable, or the config file. Returns a
-// UsageError if none is set or the value is malformed.
-func ResolveHost(cliHost string, cfg Config) (string, error) {
-	host := cliHost
-	if host == "" {
-		host = os.Getenv("WIIM_HOST")
+// host, WIIM_HOST, an explicitly selected device profile, the configured
+// default device profile, or defaultHost. Returns a UsageError if no source
+// is set or a selected profile is missing or malformed.
+func ResolveHost(cliHost, cliDevice string, cfg Config) (string, error) {
+	if cliHost != "" {
+		if err := ValidateHost(cliHost); err != nil {
+			return "", err
+		}
+		return cliHost, nil
 	}
-	if host == "" {
-		host = cfg.DefaultHost
+	if host := os.Getenv("WIIM_HOST"); host != "" {
+		if err := ValidateHost(host); err != nil {
+			return "", err
+		}
+		return host, nil
 	}
-	if host == "" {
-		return "", usagef("host is required; pass --host, set WIIM_HOST, or configure defaultHost")
+
+	selectedDevice := cliDevice
+	if selectedDevice == "" {
+		selectedDevice = cfg.DefaultDevice
 	}
-	if !hostPattern.MatchString(host) {
-		return "", usagef("host must be a hostname or IP address, not a URL")
+	if selectedDevice != "" {
+		if err := ValidateDeviceName(selectedDevice); err != nil {
+			return "", err
+		}
+		profile, ok := cfg.Devices[selectedDevice]
+		if !ok {
+			return "", usagef("device profile %q is not configured", selectedDevice)
+		}
+		if err := ValidateHost(profile.Host); err != nil {
+			return "", err
+		}
+		return profile.Host, nil
 	}
-	return host, nil
+	if cfg.DefaultHost != "" {
+		if err := ValidateHost(cfg.DefaultHost); err != nil {
+			return "", err
+		}
+		return cfg.DefaultHost, nil
+	}
+	return "", usagef("host is required; pass --host, set WIIM_HOST, use --device with one of the configured profiles, or configure defaultHost/defaultDevice")
 }
 
 // ResolveSpotifyRedirectURI returns the Spotify OAuth redirect URI from (in
@@ -181,8 +232,23 @@ func SaveConfig(path string, cfg Config) (string, error) {
 	if cfg.SpotifyRedirectURI == "" {
 		cfg.SpotifyRedirectURI = defaultSpotifyRedirectURI
 	}
-	if cfg.DefaultHost != "" && !hostPattern.MatchString(cfg.DefaultHost) {
-		return "", usagef("host must be a hostname or IP address, not a URL")
+	if cfg.DefaultHost != "" {
+		if err := ValidateHost(cfg.DefaultHost); err != nil {
+			return "", err
+		}
+	}
+	for name, profile := range cfg.Devices {
+		if err := ValidateDeviceName(name); err != nil {
+			return "", err
+		}
+		if err := ValidateHost(profile.Host); err != nil {
+			return "", err
+		}
+	}
+	if cfg.DefaultDevice != "" {
+		if _, ok := cfg.Devices[cfg.DefaultDevice]; !ok {
+			return "", usagef("default device profile %q is not configured", cfg.DefaultDevice)
+		}
 	}
 	if _, err := ResolveSpotifyRedirectURI(cfg); err != nil {
 		return "", err

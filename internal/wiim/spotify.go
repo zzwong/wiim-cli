@@ -357,7 +357,6 @@ func spotifyCallbackHandler(state string, delivery *spotifyLoginDelivery) http.H
 		default:
 			status = http.StatusOK
 			result.code = r.URL.Query().Get("code")
-			body = "Spotify login complete. You can close this tab."
 		}
 
 		if !delivery.claim() {
@@ -366,7 +365,7 @@ func spotifyCallbackHandler(state string, delivery *spotifyLoginDelivery) http.H
 		}
 		if status == http.StatusOK {
 			w.WriteHeader(status)
-			_, _ = fmt.Fprintln(w, body)
+			_, _ = fmt.Fprintln(w, "Spotify login complete. You can close this tab.")
 		} else {
 			http.Error(w, body, status)
 		}

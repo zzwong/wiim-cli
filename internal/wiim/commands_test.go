@@ -2,6 +2,7 @@ package wiim
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -184,6 +185,66 @@ func TestRelativeVolumeMissingCurrentVolume(t *testing.T) {
 	}
 	if len(fd.setVolumeValues) != 0 {
 		t.Fatalf("should not have called SetVolume: %#v", fd.setVolumeValues)
+	}
+}
+
+func TestRelativeVolumeRejectsInvalidReportedCurrentVolume(t *testing.T) {
+	tests := []struct {
+		name   string
+		status map[string]any
+	}{
+		{"negative", map[string]any{"vol": -1}},
+		{"above 100", map[string]any{"vol": 101}},
+		{"fractional", map[string]any{"vol": 38.5}},
+		{"nonnumeric", map[string]any{"vol": "loud"}},
+		{"missing", map[string]any{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fd := &fakeDevice{playerStatus: tc.status}
+			_, err := dispatchVolume([]string{"volume", "+1"}, options{}, Config{MaxVolume: 55}, fd)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if _, ok := err.(RuntimeError); !ok {
+				t.Fatalf("expected RuntimeError, got %T: %v", err, err)
+			}
+			if len(fd.setVolumeValues) != 0 {
+				t.Fatalf("should not have called SetVolume: %#v", fd.setVolumeValues)
+			}
+		})
+	}
+}
+
+func TestRelativeVolumeUpMaxIntDoesNotOverflow(t *testing.T) {
+	fd := &fakeDevice{}
+	amount := strconv.Itoa(int(^uint(0) >> 1))
+	_, err := dispatchVolume([]string{"volume", "+" + amount}, options{}, Config{MaxVolume: 55}, fd)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if _, ok := err.(UsageError); !ok {
+		t.Fatalf("expected UsageError, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "maxVolume") {
+		t.Fatalf("error should mention maxVolume: %v", err)
+	}
+	if len(fd.setVolumeValues) != 0 {
+		t.Fatalf("should not have called SetVolume: %#v", fd.setVolumeValues)
+	}
+}
+
+func TestRelativeVolumeDownCanReduceReportedVolumeAboveMax(t *testing.T) {
+	fd := &fakeDevice{playerStatus: map[string]any{"vol": 100}}
+	out, err := dispatchVolume([]string{"volume", "-1"}, options{}, Config{MaxVolume: 55}, fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Volume decreased by 1") {
+		t.Fatalf("output: %s", out)
+	}
+	if len(fd.setVolumeValues) != 1 || fd.setVolumeValues[0] != 99 {
+		t.Fatalf("SetVolume = %#v, want [99]", fd.setVolumeValues)
 	}
 }
 

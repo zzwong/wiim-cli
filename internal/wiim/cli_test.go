@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -665,5 +667,213 @@ func TestResolveHostFromConfig(t *testing.T) {
 	host, err := ResolveHost("", cfg)
 	if err != nil || host != "cfg-host" {
 		t.Fatalf("host %s err %v", host, err)
+	}
+}
+
+func TestRunRejectsInvalidCLITimeoutsBeforeExternalCalls(t *testing.T) {
+	oldDevice := newDevice
+	oldCast := castMediaStatusFunc
+	oldSearch := ssdpSearchFunc
+	defer func() {
+		newDevice = oldDevice
+		castMediaStatusFunc = oldCast
+		ssdpSearchFunc = oldSearch
+	}()
+
+	deviceCalls, castCalls, discoveryCalls := 0, 0, 0
+	newDevice = func(_ string, _ float64) device {
+		deviceCalls++
+		return &fakeDevice{}
+	}
+	castMediaStatusFunc = func(_ string, _ float64) (CastMediaInfo, error) {
+		castCalls++
+		return CastMediaInfo{}, nil
+	}
+	ssdpSearchFunc = func(_ time.Duration) ([]string, error) {
+		discoveryCalls++
+		return nil, nil
+	}
+
+	for _, timeout := range []string{"0", "-1", "1e-10", "NaN", "+Inf", "1e100"} {
+		t.Run(timeout, func(t *testing.T) {
+			for _, args := range [][]string{
+				{"--host", "wiim.local", "--timeout", timeout, "status"},
+				{"--host", "wiim.local", "--timeout", timeout, "cast-now"},
+				{"--timeout", timeout, "discover"},
+			} {
+				code, _, errText := runTest(args...)
+				if code != 2 || errText != "wiim: timeout must be a positive number within the supported duration range" {
+					t.Fatalf("args %q: code %d err %q", args, code, errText)
+				}
+				if deviceCalls != 0 || castCalls != 0 || discoveryCalls != 0 {
+					t.Fatalf("args %q made external calls: device=%d cast=%d discovery=%d", args, deviceCalls, castCalls, discoveryCalls)
+				}
+			}
+		})
+	}
+}
+
+func TestRunRejectsInvalidConfigTimeoutBeforeExternalCalls(t *testing.T) {
+	oldDevice := newDevice
+	oldCast := castMediaStatusFunc
+	oldSearch := ssdpSearchFunc
+	defer func() {
+		newDevice = oldDevice
+		castMediaStatusFunc = oldCast
+		ssdpSearchFunc = oldSearch
+	}()
+
+	deviceCalls, castCalls, discoveryCalls := 0, 0, 0
+	newDevice = func(_ string, _ float64) device { deviceCalls++; return &fakeDevice{} }
+	castMediaStatusFunc = func(_ string, _ float64) (CastMediaInfo, error) { castCalls++; return CastMediaInfo{}, nil }
+	ssdpSearchFunc = func(_ time.Duration) ([]string, error) { discoveryCalls++; return nil, nil }
+
+	for _, timeout := range []string{"-1", "1e-10", "1e100"} {
+		t.Run(timeout, func(t *testing.T) {
+			path := t.TempDir() + "/config.json"
+			if err := os.WriteFile(path, []byte(`{"defaultHost":"wiim.local","timeout":`+timeout+`}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{
+				{"--config", path, "status"},
+				{"--config", path, "cast-now"},
+				{"--config", path, "discover"},
+			} {
+				code, _, errText := runTest(args...)
+				if code != 2 || errText != "wiim: timeout must be a positive number within the supported duration range" {
+					t.Fatalf("args %q: code %d err %q", args, code, errText)
+				}
+				if deviceCalls != 0 || castCalls != 0 || discoveryCalls != 0 {
+					t.Fatalf("args %q made external calls: device=%d cast=%d discovery=%d", args, deviceCalls, castCalls, discoveryCalls)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigSetRejectsInvalidTimeout(t *testing.T) {
+	for _, timeout := range []string{"0", "-1", "1e-10", "NaN", "+Inf", "1e100"} {
+		t.Run(timeout, func(t *testing.T) {
+			path := t.TempDir() + "/config.json"
+			code, _, errText := runTest("--config", path, "config", "set", "timeout", "--", timeout)
+			if code != 2 || errText != "wiim: timeout must be a positive number within the supported duration range" {
+				t.Fatalf("code %d err %q", code, errText)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("config was persisted after rejected timeout: %v", err)
+			}
+		})
+	}
+}
+
+func TestSetupRejectsInvalidTimeoutBeforePersistence(t *testing.T) {
+	for _, timeout := range []string{"0", "-1", "1e-10", "NaN", "+Inf", "1e100"} {
+		t.Run(timeout, func(t *testing.T) {
+			path := t.TempDir() + "/config.json"
+			code, _, errText := runTest("--config", path, "--host", "wiim.local", "--timeout", timeout, "setup")
+			if code != 2 || errText != "wiim: timeout must be a positive number within the supported duration range" {
+				t.Fatalf("code %d err %q", code, errText)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("config was persisted after rejected timeout: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunAcceptsLargestSupportedTimeout(t *testing.T) {
+	fd, done := withFake(t)
+	defer done()
+
+	timeout := math.Nextafter(maxTimeoutSeconds, 0)
+	value := strconv.FormatFloat(timeout, 'g', -1, 64)
+	code, _, errText := runTest("--host", "wiim.local", "--timeout", value, "status")
+	if code != 0 || fd.timeout != timeout {
+		t.Fatalf("code %d err %q timeout %v, want %v", code, errText, fd.timeout, timeout)
+	}
+}
+
+func TestRunRejectsMalformedTimeoutWithUsageError(t *testing.T) {
+	for _, args := range [][]string{
+		{"--timeout", "not-a-number", "version"},
+		{"volume", "--timeout", "not-a-number"},
+		{"config", "set", "timeout", "not-a-number"},
+	} {
+		code, _, errText := runTest(args...)
+		if code != 2 || errText != `wiim: invalid timeout "not-a-number"` {
+			t.Fatalf("args %q: code %d err %q", args, code, errText)
+		}
+	}
+}
+
+func TestRunDistinguishesMissingTimeoutFromUnknownFlag(t *testing.T) {
+	code, _, errText := runTest("--timeout")
+	if code != 2 || errText != "wiim: flag --timeout requires a value" {
+		t.Fatalf("missing timeout: code %d err %q", code, errText)
+	}
+
+	code, _, errText = runTest("--timeout-extra")
+	if code != 1 || errText != "unknown flag: --timeout-extra" {
+		t.Fatalf("unknown timeout flag: code %d err %q", code, errText)
+	}
+}
+
+func TestRunRejectsOutOfRangeNumericTimeoutWithUsageError(t *testing.T) {
+	const want = "timeout must be a positive number within the supported duration range"
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "persistent flag", args: []string{"--timeout", "1e1000", "version"}},
+		{name: "volume parser", args: []string{"volume", "--timeout", "-1e1000"}},
+		{name: "config set", args: []string{"--config", t.TempDir() + "/config.json", "config", "set", "timeout", "--", "1e1000"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := Run(tc.args, &stdout, &stderr)
+			if ExitCode(err) != 2 {
+				t.Fatalf("exit code = %d, want 2", ExitCode(err))
+			}
+			usageErr, ok := err.(UsageError)
+			if !ok {
+				t.Fatalf("error type %T, want UsageError: %v", err, err)
+			}
+			if usageErr.Msg != want {
+				t.Fatalf("error message = %q, want %q", usageErr.Msg, want)
+			}
+			if got := strings.TrimSpace(stderr.String()); got != "wiim: "+want {
+				t.Fatalf("stderr = %q, want %q", got, "wiim: "+want)
+			}
+		})
+	}
+}
+
+func TestRunRejectsExplicitInvalidTimeoutOnNonResolvingCommands(t *testing.T) {
+	commands := [][]string{
+		{"spotify", "logout"},
+		{"config", "show"},
+		{"config", "path"},
+		{"config", "set", "maxVolume", "55"},
+		{"config", "unset", "maxVolume"},
+		{"version"},
+	}
+	for _, command := range commands {
+		args := append([]string{"--timeout", "-1"}, command...)
+		code, _, errText := runTest(args...)
+		if code != 2 || errText != "wiim: timeout must be a positive number within the supported duration range" {
+			t.Fatalf("args %q: code %d err %q", args, code, errText)
+		}
+	}
+}
+
+func TestConfigShowRejectsPersistedInvalidTimeout(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	if err := os.WriteFile(path, []byte(`{"timeout":1e-10}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errText := runTest("--config", path, "config", "show")
+	if code != 2 || out != "" || errText != "wiim: timeout must be a positive number within the supported duration range" {
+		t.Fatalf("code %d out %q err %q", code, out, errText)
 	}
 }

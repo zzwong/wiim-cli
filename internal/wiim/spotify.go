@@ -340,13 +340,15 @@ func SpotifyCredentialsStatus() (map[string]any, error) {
 
 func spotifyCallbackHandler(state string, delivery *spotifyLoginDelivery) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("state") != state {
+			http.Error(w, "state mismatch", http.StatusBadRequest)
+			return
+		}
+
 		var result spotifyLoginResult
 		status := http.StatusBadRequest
 		body := ""
 		switch {
-		case r.URL.Query().Get("state") != state:
-			result.err = runtimef("Spotify login state mismatch")
-			body = "state mismatch"
 		case r.URL.Query().Get("error") != "":
 			errorCode := r.URL.Query().Get("error")
 			result.err = runtimef("Spotify authorization failed: %s", errorCode)

@@ -219,27 +219,86 @@ func TestSpotifyCredentialsSetStatusClear(t *testing.T) {
 	}
 }
 
-func TestSpotifyCallbackHandlerRejectsStateMismatch(t *testing.T) {
+func TestSpotifyCallbackHandlerStateMismatchDoesNotClaimDelivery(t *testing.T) {
+	cases := []struct {
+		name   string
+		target string
+	}{
+		{name: "wrong state", target: "/login?state=wrong&code=abc"},
+		{name: "missing state", target: "/login?code=abc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resultCh := make(chan spotifyLoginResult, 1)
+			delivery := &spotifyLoginDelivery{ch: resultCh}
+			handler := spotifyCallbackHandler("expected", delivery)
+
+			mismatch := httptest.NewRecorder()
+			handler.ServeHTTP(mismatch, httptest.NewRequest(http.MethodGet, tc.target, nil))
+			if mismatch.Code != http.StatusBadRequest || strings.TrimSpace(mismatch.Body.String()) != "state mismatch" {
+				t.Fatalf("mismatch response: status %d body %q", mismatch.Code, mismatch.Body.String())
+			}
+			select {
+			case result := <-resultCh:
+				t.Fatalf("state mismatch published result %#v", result)
+			default:
+			}
+
+			valid := httptest.NewRecorder()
+			handler.ServeHTTP(valid, httptest.NewRequest(http.MethodGet, "/login?state=expected&code=abc", nil))
+			if valid.Code != http.StatusOK {
+				t.Fatalf("valid status %d", valid.Code)
+			}
+			result := <-resultCh
+			if result.code != "abc" || result.err != nil {
+				t.Fatalf("result %#v", result)
+			}
+		})
+	}
+}
+
+func TestSpotifyCallbackHandlerConcurrentStateMismatchDoesNotClaimDelivery(t *testing.T) {
 	resultCh := make(chan spotifyLoginResult, 1)
 	delivery := &spotifyLoginDelivery{ch: resultCh}
-	req := httptest.NewRequest("GET", "/login?state=wrong&code=abc", nil)
-	rr := httptest.NewRecorder()
+	handler := spotifyCallbackHandler("expected", delivery)
 
-	spotifyCallbackHandler("expected", delivery).ServeHTTP(rr, req)
+	const callbackCount = 32
+	start := make(chan struct{})
+	responses := make(chan *httptest.ResponseRecorder, callbackCount)
+	var wg sync.WaitGroup
+	for range callbackCount {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/login?state=wrong&code=noise", nil))
+			responses <- rr
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(responses)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status %d", rr.Code)
+	for response := range responses {
+		if response.Code != http.StatusBadRequest || strings.TrimSpace(response.Body.String()) != "state mismatch" {
+			t.Fatalf("mismatch response: status %d body %q", response.Code, response.Body.String())
+		}
 	}
 	select {
 	case result := <-resultCh:
-		if result.err == nil || !strings.Contains(result.err.Error(), "state mismatch") {
-			t.Fatalf("result %#v", result)
-		}
-		if result.code != "" {
-			t.Fatalf("unexpected code %q", result.code)
-		}
+		t.Fatalf("state mismatch published result %#v", result)
 	default:
-		t.Fatal("expected error")
+	}
+
+	valid := httptest.NewRecorder()
+	handler.ServeHTTP(valid, httptest.NewRequest(http.MethodGet, "/login?state=expected&code=abc", nil))
+	if valid.Code != http.StatusOK {
+		t.Fatalf("valid status %d", valid.Code)
+	}
+	result := <-resultCh
+	if result.code != "abc" || result.err != nil {
+		t.Fatalf("result %#v", result)
 	}
 }
 
@@ -486,26 +545,38 @@ func TestSpotifyCallbackHandlerSuccessRejectsDuplicate(t *testing.T) {
 	}
 }
 
-func TestSpotifyCallbackHandlerErrorRejectsLateSuccess(t *testing.T) {
-	resultCh := make(chan spotifyLoginResult, 1)
-	delivery := &spotifyLoginDelivery{ch: resultCh}
-	handler := spotifyCallbackHandler("expected", delivery)
-
-	first := httptest.NewRecorder()
-	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/login?state=expected&error=access_denied", nil))
-	if first.Code != http.StatusBadRequest {
-		t.Fatalf("first status %d", first.Code)
+func TestSpotifyCallbackHandlerValidStateFailuresRejectLateSuccess(t *testing.T) {
+	cases := []struct {
+		name    string
+		target  string
+		wantErr string
+	}{
+		{name: "authorization error", target: "/login?state=expected&error=access_denied", wantErr: "authorization failed"},
+		{name: "missing code", target: "/login?state=expected", wantErr: "did not include code"},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resultCh := make(chan spotifyLoginResult, 1)
+			delivery := &spotifyLoginDelivery{ch: resultCh}
+			handler := spotifyCallbackHandler("expected", delivery)
 
-	late := httptest.NewRecorder()
-	handler.ServeHTTP(late, httptest.NewRequest(http.MethodGet, "/login?state=expected&code=late", nil))
-	if late.Code != http.StatusConflict || !strings.Contains(late.Body.String(), "login callback already received") {
-		t.Fatalf("late response: status %d body %q", late.Code, late.Body.String())
-	}
+			first := httptest.NewRecorder()
+			handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, tc.target, nil))
+			if first.Code != http.StatusBadRequest {
+				t.Fatalf("first status %d", first.Code)
+			}
 
-	result := <-resultCh
-	if result.code != "" || result.err == nil || !strings.Contains(result.err.Error(), "authorization failed") {
-		t.Fatalf("result %#v", result)
+			late := httptest.NewRecorder()
+			handler.ServeHTTP(late, httptest.NewRequest(http.MethodGet, "/login?state=expected&code=late", nil))
+			if late.Code != http.StatusConflict || !strings.Contains(late.Body.String(), "login callback already received") {
+				t.Fatalf("late response: status %d body %q", late.Code, late.Body.String())
+			}
+
+			result := <-resultCh
+			if result.code != "" || result.err == nil || !strings.Contains(result.err.Error(), tc.wantErr) {
+				t.Fatalf("result %#v", result)
+			}
+		})
 	}
 }
 

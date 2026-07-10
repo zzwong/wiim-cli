@@ -3,6 +3,7 @@ package wiim
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -37,6 +38,7 @@ var (
 	spotifyAccountsBaseURL = spotifyAccountsBase
 	spotifyHTTPClient      = &http.Client{Timeout: 15 * time.Second}
 	openSpotifyBrowser     = openBrowser
+	listenSpotifyCallback  = net.Listen
 )
 
 // SpotifyClient provides access to the Spotify Web API for device discovery,
@@ -72,13 +74,24 @@ type spotifyLoginDelivery struct {
 	ch   chan<- spotifyLoginResult
 }
 
-func (d *spotifyLoginDelivery) deliver(result spotifyLoginResult) bool {
-	delivered := false
+func (d *spotifyLoginDelivery) claim() bool {
+	claimed := false
 	d.once.Do(func() {
-		d.ch <- result
-		delivered = true
+		claimed = true
 	})
-	return delivered
+	return claimed
+}
+
+func (d *spotifyLoginDelivery) publish(result spotifyLoginResult) {
+	d.ch <- result
+}
+
+func (d *spotifyLoginDelivery) deliver(result spotifyLoginResult) bool {
+	if !d.claim() {
+		return false
+	}
+	d.publish(result)
+	return true
 }
 
 // NewSpotifyClient creates an authenticated SpotifyClient. It first tries the
@@ -327,36 +340,40 @@ func SpotifyCredentialsStatus() (map[string]any, error) {
 
 func spotifyCallbackHandler(state string, delivery *spotifyLoginDelivery) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("state"); got != state {
-			if delivery.deliver(spotifyLoginResult{err: runtimef("Spotify login state mismatch")}) {
-				http.Error(w, "state mismatch", http.StatusBadRequest)
-			} else {
-				http.Error(w, "login callback already received", http.StatusConflict)
-			}
-			return
+		var result spotifyLoginResult
+		status := http.StatusBadRequest
+		body := ""
+		switch {
+		case r.URL.Query().Get("state") != state:
+			result.err = runtimef("Spotify login state mismatch")
+			body = "state mismatch"
+		case r.URL.Query().Get("error") != "":
+			errorCode := r.URL.Query().Get("error")
+			result.err = runtimef("Spotify authorization failed: %s", errorCode)
+			body = errorCode
+		case r.URL.Query().Get("code") == "":
+			result.err = runtimef("Spotify callback did not include code")
+			body = "missing code"
+		default:
+			status = http.StatusOK
+			result.code = r.URL.Query().Get("code")
+			body = "Spotify login complete. You can close this tab."
 		}
-		if e := r.URL.Query().Get("error"); e != "" {
-			if delivery.deliver(spotifyLoginResult{err: runtimef("Spotify authorization failed: %s", e)}) {
-				http.Error(w, e, http.StatusBadRequest)
-			} else {
-				http.Error(w, "login callback already received", http.StatusConflict)
-			}
-			return
-		}
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			if delivery.deliver(spotifyLoginResult{err: runtimef("Spotify callback did not include code")}) {
-				http.Error(w, "missing code", http.StatusBadRequest)
-			} else {
-				http.Error(w, "login callback already received", http.StatusConflict)
-			}
-			return
-		}
-		if delivery.deliver(spotifyLoginResult{code: code}) {
-			fmt.Fprintln(w, "Spotify login complete. You can close this tab.")
-		} else {
+
+		if !delivery.claim() {
 			http.Error(w, "login callback already received", http.StatusConflict)
+			return
 		}
+		if status == http.StatusOK {
+			w.WriteHeader(status)
+			_, _ = fmt.Fprintln(w, body)
+		} else {
+			http.Error(w, body, status)
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		delivery.publish(result)
 	}
 }
 
@@ -376,7 +393,7 @@ func SpotifyLogin(stdout io.Writer, redirectURI string) error {
 	if err != nil {
 		return err
 	}
-	listener, err := net.Listen("tcp", listenAddr)
+	listener, err := listenSpotifyCallback("tcp", listenAddr)
 	if err != nil {
 		return err
 	}
@@ -385,12 +402,22 @@ func SpotifyLogin(stdout io.Writer, redirectURI string) error {
 	mux := http.NewServeMux()
 	server := &http.Server{Addr: listenAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	mux.HandleFunc(callbackPath, spotifyCallbackHandler(state, delivery))
+	serveDone := make(chan struct{})
 	go func() {
+		defer close(serveDone)
 		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			delivery.deliver(spotifyLoginResult{err: err})
 		}
 	}()
-	defer server.Close()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			_ = listener.Close()
+			_ = server.Close()
+		}
+		<-serveDone
+	}()
 	authURL := spotifyAuthURL(creds.clientID, state, redirectURI)
 	fmt.Fprintf(stdout, "Opening Spotify authorization URL:\n%s\n", authURL)
 	_ = openSpotifyBrowser(authURL)

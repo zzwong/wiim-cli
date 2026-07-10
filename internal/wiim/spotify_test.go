@@ -3,17 +3,31 @@ package wiim
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/zalando/go-keyring"
 )
+
+type spotifyReadyListener struct {
+	net.Listener
+	ready chan<- struct{}
+	once  sync.Once
+}
+
+func (l *spotifyReadyListener) Accept() (net.Conn, error) {
+	l.once.Do(func() { close(l.ready) })
+	return l.Listener.Accept()
+}
 
 func setupSpotifyTest(t *testing.T) {
 	t.Helper()
@@ -26,6 +40,7 @@ func setupSpotifyTest(t *testing.T) {
 	oldAccountsBaseURL := spotifyAccountsBaseURL
 	oldHTTPClient := spotifyHTTPClient
 	oldOpenBrowser := openSpotifyBrowser
+	oldListenSpotifyCallback := listenSpotifyCallback
 	spotifyAPIBaseURL = spotifyAPIBase
 	spotifyAccountsBaseURL = spotifyAccountsBase
 	spotifyHTTPClient = &http.Client{Timeout: 15 * time.Second}
@@ -35,6 +50,7 @@ func setupSpotifyTest(t *testing.T) {
 		spotifyAccountsBaseURL = oldAccountsBaseURL
 		spotifyHTTPClient = oldHTTPClient
 		openSpotifyBrowser = oldOpenBrowser
+		listenSpotifyCallback = oldListenSpotifyCallback
 	})
 }
 
@@ -602,7 +618,7 @@ func TestSpotifyLoginBindFailureBeforeBrowser(t *testing.T) {
 		return nil
 	}
 	err = SpotifyLogin(io.Discard, "http://"+listener.Addr().String()+"/login")
-	if err == nil || !strings.Contains(err.Error(), "address already in use") {
+	if err == nil || !errors.Is(err, syscall.EADDRINUSE) {
 		t.Fatalf("err %v", err)
 	}
 	if opened {
@@ -636,8 +652,12 @@ func TestSpotifyLoginHappyPathUsesLoopbackCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	redirectURI := "http://" + listener.Addr().String() + "/login"
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
+	serverReady := make(chan struct{})
+	listenSpotifyCallback = func(network, address string) (net.Listener, error) {
+		if network != "tcp" || address != listener.Addr().String() {
+			t.Fatalf("listen %s %s", network, address)
+		}
+		return &spotifyReadyListener{Listener: listener, ready: serverReady}, nil
 	}
 	authURLCh := make(chan string, 1)
 	openSpotifyBrowser = func(rawURL string) error {
@@ -664,21 +684,28 @@ func TestSpotifyLoginHappyPathUsesLoopbackCallback(t *testing.T) {
 		t.Fatalf("auth URL %s", authURL)
 	}
 	callbackURL := redirectURI + "?state=" + url.QueryEscape(state) + "&code=login-code"
-	httpClient := &http.Client{Timeout: time.Second}
-	var resp *http.Response
-	for i := 0; i < 20; i++ {
-		resp, err = httpClient.Get(callbackURL)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-serverReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for callback server")
 	}
+	httpClient := &http.Client{Timeout: time.Second}
+	resp, err := httpClient.Get(callbackURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr := resp.Body.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("callback status %d", resp.StatusCode)
+	}
+	if got, want := string(body), "Spotify login complete. You can close this tab.\n"; got != want {
+		t.Fatalf("callback body %q, want %q", got, want)
 	}
 	select {
 	case err := <-errCh:

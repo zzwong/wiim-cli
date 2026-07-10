@@ -1,6 +1,7 @@
 package wiim
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -54,9 +55,8 @@ func TestAddDeviceProfileValidatesBeforeMutating(t *testing.T) {
 		t.Run(tc.name+"/"+tc.host, func(t *testing.T) {
 			cfg := cloneConfig(base)
 			before := cloneConfig(cfg)
-			if err := AddDeviceProfile(&cfg, tc.name, tc.host); err == nil {
-				t.Fatal("AddDeviceProfile() succeeded, want error")
-			}
+			err := AddDeviceProfile(&cfg, tc.name, tc.host)
+			requireDeviceProfileUsageError(t, err)
 			if !reflect.DeepEqual(cfg, before) {
 				t.Fatalf("config mutated on error: got %#v, want %#v", cfg, before)
 			}
@@ -75,6 +75,31 @@ func TestAddDeviceProfileInitializesMap(t *testing.T) {
 	}
 }
 
+func TestAddDeviceProfileDoesNotMutateShallowSnapshot(t *testing.T) {
+	cfg := Config{
+		DefaultDevice: "office",
+		Devices: map[string]DeviceProfile{
+			"office": {Host: "office-host"},
+		},
+	}
+	snapshot := cfg
+	if err := AddDeviceProfile(&cfg, "living-room", "living-host"); err != nil {
+		t.Fatalf("AddDeviceProfile() error = %v", err)
+	}
+	if snapshot.DefaultDevice != cfg.DefaultDevice {
+		t.Fatalf("snapshot default = %q, cfg default = %q", snapshot.DefaultDevice, cfg.DefaultDevice)
+	}
+	if len(snapshot.Devices) != 1 || snapshot.Devices["office"].Host != "office-host" {
+		t.Fatalf("snapshot devices = %#v, want only office profile", snapshot.Devices)
+	}
+	if _, ok := snapshot.Devices["living-room"]; ok {
+		t.Fatal("shallow snapshot observed added profile")
+	}
+	if cfg.Devices["living-room"].Host != "living-host" {
+		t.Fatalf("cfg devices = %#v, want added profile", cfg.Devices)
+	}
+}
+
 func TestRemoveDeviceProfile(t *testing.T) {
 	base := Config{
 		DefaultHost:   "default-host",
@@ -90,9 +115,8 @@ func TestRemoveDeviceProfile(t *testing.T) {
 	t.Run("unknown does not mutate", func(t *testing.T) {
 		cfg := cloneConfig(base)
 		before := cloneConfig(cfg)
-		if err := RemoveDeviceProfile(&cfg, "missing"); err == nil {
-			t.Fatal("RemoveDeviceProfile() succeeded, want error")
-		}
+		err := RemoveDeviceProfile(&cfg, "missing")
+		requireDeviceProfileUsageError(t, err)
 		if !reflect.DeepEqual(cfg, before) {
 			t.Fatalf("config mutated on error: got %#v, want %#v", cfg, before)
 		}
@@ -100,6 +124,7 @@ func TestRemoveDeviceProfile(t *testing.T) {
 
 	t.Run("active clears default only", func(t *testing.T) {
 		cfg := cloneConfig(base)
+		snapshot := cfg
 		if err := RemoveDeviceProfile(&cfg, "office"); err != nil {
 			t.Fatalf("RemoveDeviceProfile() error = %v", err)
 		}
@@ -108,6 +133,9 @@ func TestRemoveDeviceProfile(t *testing.T) {
 		}
 		if !reflect.DeepEqual(cfg.Devices, map[string]DeviceProfile{"other": {Host: "other-host"}}) {
 			t.Fatalf("Devices = %#v", cfg.Devices)
+		}
+		if snapshot.DefaultDevice != "office" || snapshot.Devices["office"].Host != "office-host" {
+			t.Fatalf("shallow snapshot changed: %#v", snapshot)
 		}
 	})
 
@@ -135,9 +163,8 @@ func TestUseDeviceProfile(t *testing.T) {
 	t.Run("unknown does not mutate", func(t *testing.T) {
 		cfg := cloneConfig(base)
 		before := cloneConfig(cfg)
-		if err := UseDeviceProfile(&cfg, "missing"); err == nil {
-			t.Fatal("UseDeviceProfile() succeeded, want error")
-		}
+		err := UseDeviceProfile(&cfg, "missing")
+		requireDeviceProfileUsageError(t, err)
 		if !reflect.DeepEqual(cfg, before) {
 			t.Fatalf("config mutated on error: got %#v, want %#v", cfg, before)
 		}
@@ -181,6 +208,31 @@ func TestDeviceProfileHelpersPreserveConfigOnRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(loaded.Devices, cfg.Devices) {
 		t.Fatalf("Devices after round trip = %#v, want %#v", loaded.Devices, cfg.Devices)
+	}
+}
+
+func requireDeviceProfileUsageError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("helper succeeded, want UsageError")
+	}
+	if _, ok := err.(UsageError); !ok {
+		t.Fatalf("error type %T, want UsageError: %v", err, err)
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Fatalf("ExitCode = %d, want 2", code)
+	}
+	var envelope struct {
+		Error struct {
+			Kind     string `json:"kind"`
+			ExitCode int    `json:"exitCode"`
+		} `json:"error"`
+	}
+	if jsonErr := json.Unmarshal([]byte(FormatError(err, true)), &envelope); jsonErr != nil {
+		t.Fatalf("JSON error envelope is invalid: %v", jsonErr)
+	}
+	if envelope.Error.Kind != "usage" || envelope.Error.ExitCode != 2 {
+		t.Fatalf("JSON error envelope = %+v, want usage/2", envelope.Error)
 	}
 }
 

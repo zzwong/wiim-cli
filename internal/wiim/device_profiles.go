@@ -42,10 +42,12 @@ func AddDeviceProfile(cfg *Config, name, host string) error {
 	if _, exists := cfg.Devices[name]; exists {
 		return usagef("device profile %q is already configured", name)
 	}
-	if cfg.Devices == nil {
-		cfg.Devices = make(map[string]DeviceProfile)
+	devices := make(map[string]DeviceProfile, len(cfg.Devices)+1)
+	for profileName, profile := range cfg.Devices {
+		devices[profileName] = profile
 	}
-	cfg.Devices[name] = DeviceProfile{Host: host}
+	devices[name] = DeviceProfile{Host: host}
+	cfg.Devices = devices
 	return nil
 }
 
@@ -60,7 +62,12 @@ func RemoveDeviceProfile(cfg *Config, name string) error {
 	if _, exists := cfg.Devices[name]; !exists {
 		return usagef("device profile %q is not configured", name)
 	}
-	delete(cfg.Devices, name)
+	devices := make(map[string]DeviceProfile, len(cfg.Devices))
+	for profileName, profile := range cfg.Devices {
+		devices[profileName] = profile
+	}
+	delete(devices, name)
+	cfg.Devices = devices
 	if cfg.DefaultDevice == name {
 		cfg.DefaultDevice = ""
 	}

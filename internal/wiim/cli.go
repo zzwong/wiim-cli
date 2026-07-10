@@ -394,7 +394,7 @@ func (a *app) runDiscover(_ *cobra.Command, _ []string) error {
 func (a *app) runConfigPath(_ *cobra.Command, _ []string) error {
 	path, err := ConfigPath(a.opts.config)
 	if err != nil {
-		return err
+		return runtimef("could not determine config path: %v", err)
 	}
 	fmt.Fprintln(a.stdout, path)
 	return nil

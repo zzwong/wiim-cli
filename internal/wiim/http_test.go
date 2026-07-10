@@ -2,6 +2,7 @@ package wiim
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"testing"
 )
@@ -37,5 +38,17 @@ func TestReadLimitedResponse(t *testing.T) {
 	}
 	if _, err := readLimitedResponse(strings.NewReader("x"), 0); err == nil {
 		t.Fatal("expected response over zero limit to fail")
+	}
+
+	for _, tc := range []struct {
+		limit int64
+		want  string
+	}{
+		{limit: -1, want: "response limit must be non-negative"},
+		{limit: math.MaxInt64, want: "response limit must be less than math.MaxInt64"},
+	} {
+		if _, err := readLimitedResponse(strings.NewReader(""), tc.limit); err == nil || err.Error() != tc.want {
+			t.Fatalf("invalid response limit %d error = %v, want %q", tc.limit, err, tc.want)
+		}
 	}
 }

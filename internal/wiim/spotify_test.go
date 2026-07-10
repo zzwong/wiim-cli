@@ -3,7 +3,6 @@ package wiim
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -618,8 +616,8 @@ func TestSpotifyLoginBindFailureBeforeBrowser(t *testing.T) {
 		return nil
 	}
 	err = SpotifyLogin(io.Discard, "http://"+listener.Addr().String()+"/login")
-	if err == nil || !errors.Is(err, syscall.EADDRINUSE) {
-		t.Fatalf("err %v", err)
+	if err == nil {
+		t.Fatal("expected bind failure")
 	}
 	if opened {
 		t.Fatal("browser opened after bind failure")

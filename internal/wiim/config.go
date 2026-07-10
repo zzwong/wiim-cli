@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,8 +23,9 @@ const (
 )
 
 var (
-	userHomeDir = os.UserHomeDir
-	renameFile  = os.Rename
+	userHomeDir       = os.UserHomeDir
+	renameFile        = os.Rename
+	preserveOwnership = preserveExistingFileOwnership
 )
 
 // DeviceProfile holds the connection settings for a named WiiM device.
@@ -285,9 +287,10 @@ func SaveConfig(path string, cfg Config) (string, error) {
 	return path, nil
 }
 
-// preserveUnknownConfigFields keeps forward-compatible top-level settings from
-// an existing JSON object. Current Config fields always win, so known keys are
-// overwritten or omitted according to the config being saved.
+// preserveUnknownConfigFields keeps forward-compatible settings from an
+// existing JSON object. Current Config fields always win, so known keys are
+// overwritten or omitted according to the config being saved. Unknown fields
+// within a profile are retained only for profiles still present in cfg.
 func preserveUnknownConfigFields(path string, data []byte) ([]byte, error) {
 	existing, err := os.ReadFile(path)
 	if err != nil {
@@ -308,12 +311,17 @@ func preserveUnknownConfigFields(path string, data []byte) ([]byte, error) {
 
 	preserved := false
 	for key, value := range previous {
-		if _, known := knownConfigKeys[key]; known {
+		if isKnownConfigKey(key) {
 			continue
 		}
 		current[key] = value
 		preserved = true
 	}
+	profileFieldsPreserved, err := preserveUnknownDeviceProfileFields(previous, current)
+	if err != nil {
+		return nil, err
+	}
+	preserved = preserved || profileFieldsPreserved
 	if !preserved {
 		return data, nil
 	}
@@ -323,6 +331,88 @@ func preserveUnknownConfigFields(path string, data []byte) ([]byte, error) {
 		return nil, err
 	}
 	return append(merged, '\n'), nil
+}
+
+func isKnownConfigKey(key string) bool {
+	for knownKey := range knownConfigKeys {
+		if strings.EqualFold(key, knownKey) {
+			return true
+		}
+	}
+	return false
+}
+
+// preserveUnknownDeviceProfileFields merges unknown fields only into current
+// profiles. In particular, it never adds a profile from the previous config.
+func preserveUnknownDeviceProfileFields(previous, current map[string]json.RawMessage) (bool, error) {
+	currentDevices, ok := current["devices"]
+	if !ok {
+		return false, nil
+	}
+	var currentProfiles map[string]json.RawMessage
+	if err := json.Unmarshal(currentDevices, &currentProfiles); err != nil || currentProfiles == nil {
+		return false, nil
+	}
+
+	preserved := false
+	for key, value := range previous {
+		if !strings.EqualFold(key, "devices") {
+			continue
+		}
+		var previousProfiles map[string]json.RawMessage
+		if err := json.Unmarshal(value, &previousProfiles); err != nil || previousProfiles == nil {
+			continue
+		}
+		for name, previousProfile := range previousProfiles {
+			currentProfile, ok := currentProfiles[name]
+			if !ok {
+				continue
+			}
+			mergedProfile, changed := mergeUnknownDeviceProfileFields(previousProfile, currentProfile)
+			if !changed {
+				continue
+			}
+			currentProfiles[name] = mergedProfile
+			preserved = true
+		}
+	}
+	if !preserved {
+		return false, nil
+	}
+	mergedDevices, err := json.Marshal(currentProfiles)
+	if err != nil {
+		return false, err
+	}
+	current["devices"] = mergedDevices
+	return true, nil
+}
+
+func mergeUnknownDeviceProfileFields(previous, current json.RawMessage) (json.RawMessage, bool) {
+	var previousFields map[string]json.RawMessage
+	if err := json.Unmarshal(previous, &previousFields); err != nil || previousFields == nil {
+		return current, false
+	}
+	var currentFields map[string]json.RawMessage
+	if err := json.Unmarshal(current, &currentFields); err != nil || currentFields == nil {
+		return current, false
+	}
+
+	preserved := false
+	for key, value := range previousFields {
+		if strings.EqualFold(key, "host") {
+			continue
+		}
+		currentFields[key] = value
+		preserved = true
+	}
+	if !preserved {
+		return current, false
+	}
+	merged, err := json.Marshal(currentFields)
+	if err != nil {
+		return current, false
+	}
+	return merged, true
 }
 
 // writeFileAtomic writes data to a complete, durable temporary file before
@@ -365,6 +455,9 @@ func writeFileAtomic(path string, data []byte) (err error) {
 		return fmt.Errorf("close temporary config %s: %w", tempPath, err)
 	}
 	temp = nil
+	if err = preserveOwnership(path, tempPath); err != nil {
+		return fmt.Errorf("preserve config ownership %s: %w", path, err)
+	}
 	if err = renameFile(tempPath, path); err != nil {
 		return fmt.Errorf("replace config %s: %w", path, err)
 	}

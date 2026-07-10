@@ -622,9 +622,26 @@ func TestWriteFileAtomicRenameFailurePreservesTargetAndCleansUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	forcedErr := errors.New("forced rename failure")
-	old := renameFile
-	renameFile = func(string, string) error { return forcedErr }
-	t.Cleanup(func() { renameFile = old })
+	oldRename := renameFile
+	oldPreserveOwnership := preserveOwnership
+	ownershipPreserved := false
+	preserveOwnership = func(targetPath, replacementPath string) error {
+		if targetPath != path || replacementPath == path {
+			t.Fatalf("preserveOwnership(%q, %q), want target and temporary replacement", targetPath, replacementPath)
+		}
+		ownershipPreserved = true
+		return nil
+	}
+	renameFile = func(string, string) error {
+		if !ownershipPreserved {
+			t.Fatal("rename called before ownership preservation")
+		}
+		return forcedErr
+	}
+	t.Cleanup(func() {
+		renameFile = oldRename
+		preserveOwnership = oldPreserveOwnership
+	})
 
 	err := writeFileAtomic(path, []byte("{\"complete\":\"new config\"}\n"))
 	if !errors.Is(err, forcedErr) {
@@ -676,6 +693,120 @@ func TestSaveLoadConfigProfileRoundTrip(t *testing.T) {
 		if got.Devices[name] != profile {
 			t.Fatalf("profile %q = %#v, want %#v", name, got.Devices[name], want.Devices[name])
 		}
+	}
+}
+
+func TestSaveConfigPreservesUnknownProfileFieldsWithoutResurrectingRemovedProfiles(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	initial := []byte(`{
+  "devices": {
+    "office": {
+      "HOST": "old-office-host",
+      "futureSetting": {"enabled": true},
+      "token": "keep-me"
+    },
+    "removed": {
+      "host": "removed-host",
+      "token": "must-not-return"
+    }
+  }
+}`)
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{Devices: map[string]DeviceProfile{
+		"office": {Host: "current-office-host"},
+		"new":    {Host: "new-host"},
+	}}
+	if _, err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("saved config is invalid JSON: %v", err)
+	}
+	var devices map[string]json.RawMessage
+	if err := json.Unmarshal(fields["devices"], &devices); err != nil {
+		t.Fatalf("devices = %s: %v", fields["devices"], err)
+	}
+	if _, ok := devices["removed"]; ok {
+		t.Fatalf("removed profile was resurrected: %s", devices["removed"])
+	}
+	var office map[string]json.RawMessage
+	if err := json.Unmarshal(devices["office"], &office); err != nil {
+		t.Fatalf("office profile = %s: %v", devices["office"], err)
+	}
+	if got, want := string(office["host"]), `"current-office-host"`; got != want {
+		t.Fatalf("office host = %s, want %s", got, want)
+	}
+	if _, ok := office["HOST"]; ok {
+		t.Fatalf("case-insensitive known host survived: %s", office["HOST"])
+	}
+	if got, want := string(office["token"]), `"keep-me"`; got != want {
+		t.Fatalf("office token = %s, want %s", got, want)
+	}
+	var future map[string]bool
+	if err := json.Unmarshal(office["futureSetting"], &future); err != nil || !future["enabled"] {
+		t.Fatalf("office futureSetting = %s, %v; want preserved object", office["futureSetting"], err)
+	}
+	var newProfile map[string]json.RawMessage
+	if err := json.Unmarshal(devices["new"], &newProfile); err != nil {
+		t.Fatalf("new profile = %s: %v", devices["new"], err)
+	}
+	if _, ok := newProfile["token"]; ok {
+		t.Fatalf("new profile inherited existing metadata: %s", devices["new"])
+	}
+}
+
+func TestSaveConfigTreatsKnownTopLevelKeysCaseInsensitively(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	initial := []byte(`{
+  "DEFAULTHOST": "stale-host",
+  "DEFAULTDEVICE": "stale-device",
+  "DEVICES": {"stale": {"host": "stale-host"}},
+  "TIMEOUT": 99,
+  "SPOTIFYREDIRECTURI": "http://127.0.0.1:19999/stale",
+  "MAXVOLUME": 99,
+  "futureSetting": true
+}`)
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{DefaultHost: "current-host", Timeout: 4, MaxVolume: 60}
+	if _, err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("saved config is invalid JSON: %v", err)
+	}
+	expectedKnownKeys := map[string]bool{
+		"defaultHost":        true,
+		"timeout":            true,
+		"spotifyRedirectURI": true,
+		"maxVolume":          true,
+	}
+	for key := range fields {
+		if isKnownConfigKey(key) && !expectedKnownKeys[key] {
+			t.Fatalf("stale or non-canonical known key %q survived", key)
+		}
+	}
+	if got, want := string(fields["defaultHost"]), `"current-host"`; got != want {
+		t.Fatalf("defaultHost = %s, want %s", got, want)
+	}
+	if got, want := string(fields["futureSetting"]), "true"; got != want {
+		t.Fatalf("futureSetting = %s, want %s", got, want)
 	}
 }
 

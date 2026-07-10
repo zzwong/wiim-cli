@@ -501,11 +501,11 @@ func openBrowser(rawURL string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", rawURL)
+		cmd = exec.Command("open", rawURL) // #nosec G204 -- fixed argv, no shell
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL)
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL) // #nosec G204 -- fixed argv, no shell
 	default:
-		cmd = exec.Command("xdg-open", rawURL)
+		cmd = exec.Command("xdg-open", rawURL) // #nosec G204 -- fixed argv, no shell
 	}
 	return cmd.Start()
 }

@@ -3,17 +3,20 @@ package wiim
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zalando/go-keyring"
@@ -35,6 +38,7 @@ var (
 	spotifyAccountsBaseURL = spotifyAccountsBase
 	spotifyHTTPClient      = &http.Client{Timeout: 15 * time.Second}
 	openSpotifyBrowser     = openBrowser
+	listenSpotifyCallback  = net.Listen
 )
 
 // SpotifyClient provides access to the Spotify Web API for device discovery,
@@ -58,6 +62,36 @@ type spotifyTokenResponse struct {
 	TokenType    string `json:"token_type"`
 	Scope        string `json:"scope"`
 	ExpiresIn    int    `json:"expires_in"`
+}
+
+type spotifyLoginResult struct {
+	code string
+	err  error
+}
+
+type spotifyLoginDelivery struct {
+	once sync.Once
+	ch   chan<- spotifyLoginResult
+}
+
+func (d *spotifyLoginDelivery) claim() bool {
+	claimed := false
+	d.once.Do(func() {
+		claimed = true
+	})
+	return claimed
+}
+
+func (d *spotifyLoginDelivery) publish(result spotifyLoginResult) {
+	d.ch <- result
+}
+
+func (d *spotifyLoginDelivery) deliver(result spotifyLoginResult) bool {
+	if !d.claim() {
+		return false
+	}
+	d.publish(result)
+	return true
 }
 
 // NewSpotifyClient creates an authenticated SpotifyClient. It first tries the
@@ -164,7 +198,7 @@ func (s *SpotifyClient) request(method, path string, body any) (any, error) {
 		return nil, runtimef("Spotify API request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := readLimitedResponse(resp.Body, spotifyAPIResponseLimit)
 	if err != nil {
 		return nil, runtimef("could not read Spotify API response: %v", err)
 	}
@@ -304,26 +338,43 @@ func SpotifyCredentialsStatus() (map[string]any, error) {
 	return status, nil
 }
 
-func spotifyCallbackHandler(state string, codeCh chan<- string, errCh chan<- error) http.HandlerFunc {
+func spotifyCallbackHandler(state string, delivery *spotifyLoginDelivery) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("state"); got != state {
-			errCh <- runtimef("Spotify login state mismatch")
+		if r.URL.Query().Get("state") != state {
 			http.Error(w, "state mismatch", http.StatusBadRequest)
 			return
 		}
-		if e := r.URL.Query().Get("error"); e != "" {
-			errCh <- runtimef("Spotify authorization failed: %s", e)
-			http.Error(w, e, http.StatusBadRequest)
+
+		var result spotifyLoginResult
+		status := http.StatusBadRequest
+		body := ""
+		switch {
+		case r.URL.Query().Get("error") != "":
+			errorCode := r.URL.Query().Get("error")
+			result.err = runtimef("Spotify authorization failed: %s", errorCode)
+			body = errorCode
+		case r.URL.Query().Get("code") == "":
+			result.err = runtimef("Spotify callback did not include code")
+			body = "missing code"
+		default:
+			status = http.StatusOK
+			result.code = r.URL.Query().Get("code")
+		}
+
+		if !delivery.claim() {
+			http.Error(w, "login callback already received", http.StatusConflict)
 			return
 		}
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			errCh <- runtimef("Spotify callback did not include code")
-			http.Error(w, "missing code", http.StatusBadRequest)
-			return
+		if status == http.StatusOK {
+			w.WriteHeader(status)
+			_, _ = fmt.Fprintln(w, "Spotify login complete. You can close this tab.")
+		} else {
+			http.Error(w, body, status)
 		}
-		fmt.Fprintln(w, "Spotify login complete. You can close this tab.")
-		codeCh <- code
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		delivery.publish(result)
 	}
 }
 
@@ -339,27 +390,44 @@ func SpotifyLogin(stdout io.Writer, redirectURI string) error {
 	if err != nil {
 		return err
 	}
-	codeCh := make(chan string, 1)
-	errCh := make(chan error, 1)
 	listenAddr, callbackPath, err := spotifyCallbackListen(redirectURI)
 	if err != nil {
 		return err
 	}
+	listener, err := listenSpotifyCallback("tcp", listenAddr)
+	if err != nil {
+		return err
+	}
+	resultCh := make(chan spotifyLoginResult, 1)
+	delivery := &spotifyLoginDelivery{ch: resultCh}
 	mux := http.NewServeMux()
 	server := &http.Server{Addr: listenAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	mux.HandleFunc(callbackPath, spotifyCallbackHandler(state, codeCh, errCh))
+	mux.HandleFunc(callbackPath, spotifyCallbackHandler(state, delivery))
+	serveDone := make(chan struct{})
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
+		defer close(serveDone)
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			delivery.deliver(spotifyLoginResult{err: err})
 		}
 	}()
-	defer server.Close()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			_ = listener.Close()
+			_ = server.Close()
+		}
+		<-serveDone
+	}()
 	authURL := spotifyAuthURL(creds.clientID, state, redirectURI)
 	fmt.Fprintf(stdout, "Opening Spotify authorization URL:\n%s\n", authURL)
 	_ = openSpotifyBrowser(authURL)
 	select {
-	case code := <-codeCh:
-		token, err := exchangeSpotifyCode(creds.clientID, creds.clientSecret, code, redirectURI)
+	case result := <-resultCh:
+		if result.err != nil {
+			return result.err
+		}
+		token, err := exchangeSpotifyCode(creds.clientID, creds.clientSecret, result.code, redirectURI)
 		if err != nil {
 			return err
 		}
@@ -368,8 +436,6 @@ func SpotifyLogin(stdout io.Writer, redirectURI string) error {
 		}
 		fmt.Fprintln(stdout, "Spotify token stored in OS keychain.")
 		return nil
-	case err := <-errCh:
-		return err
 	case <-time.After(3 * time.Minute):
 		return runtimef("timed out waiting for Spotify login callback")
 	}
@@ -429,9 +495,9 @@ func spotifyTokenRequest(clientID, clientSecret string, values url.Values, fallb
 		return spotifyTokenCache{}, runtimef("Spotify token request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := readLimitedResponse(resp.Body, spotifyTokenResponseLimit)
 	if err != nil {
-		return spotifyTokenCache{}, err
+		return spotifyTokenCache{}, runtimef("could not read Spotify token response: %v", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return spotifyTokenCache{}, runtimef("Spotify token endpoint returned HTTP %d: %s", resp.StatusCode, responseSnippet(strings.TrimSpace(string(data))))
@@ -501,11 +567,11 @@ func openBrowser(rawURL string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", rawURL)
+		cmd = exec.Command("open", rawURL) // #nosec G204 -- fixed argv, no shell
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL)
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL) // #nosec G204 -- fixed argv, no shell
 	default:
-		cmd = exec.Command("xdg-open", rawURL)
+		cmd = exec.Command("xdg-open", rawURL) // #nosec G204 -- fixed argv, no shell
 	}
 	return cmd.Start()
 }

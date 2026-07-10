@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -202,7 +201,7 @@ func (c *Client) request(rawURL string) (any, error) {
 		return nil, fmt.Errorf("could not connect to %s: %w", c.Host, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimitedResponse(resp.Body, wiimAPIResponseLimit)
 	if err != nil {
 		return nil, runtimef("could not read response from %s: %v", c.Host, err)
 	}

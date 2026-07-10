@@ -16,6 +16,9 @@ make build
 
 ## Testing
 
+Docs-only changes run CI because `TestSkillDocMentionsAllCommands` enforces command/skill
+documentation consistency.
+
 Tests must not contact a real WiiM device, a real Spotify API, or any other real network
 service. Fake the WiiM/Spotify HTTP APIs with `httptest.NewServer`, and fake the Cast TLS
 protocol with `net.Pipe` (see `cast_test.go` for the pattern). Table-driven tests are the

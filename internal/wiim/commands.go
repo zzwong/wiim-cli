@@ -20,7 +20,10 @@ func dispatchSetup(args []string, opts options, cfg Config) (string, error) {
 		host = cfg.DefaultHost
 	}
 	cfg.DefaultHost = host
-	if opts.timeout > 0 {
+	if opts.timeout != 0 {
+		if err := validateTimeout(opts.timeout); err != nil {
+			return "", err
+		}
 		cfg.Timeout = opts.timeout
 	}
 	path, err := WriteInitialConfig(opts.config, cfg)

@@ -1,16 +1,24 @@
 package wiim
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"time"
 )
 
 const (
 	defaultSpotifyRedirectURI = "http://127.0.0.1:19872/login"
 	defaultMaxVolume          = 55
+	timeoutRangeErrorMessage  = "timeout must be a positive number within the supported duration range"
 )
+
+var userHomeDir = os.UserHomeDir
 
 // Config holds persistent settings for connecting to a WiiM device.
 type Config struct {
@@ -26,7 +34,7 @@ func ConfigPath(path string) (string, error) {
 	if path != "" {
 		return path, nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := userHomeDir()
 	if err != nil {
 		return "", err
 	}
@@ -38,7 +46,7 @@ func ConfigPath(path string) (string, error) {
 func LoadConfig(path string) (Config, error) {
 	path, pathErr := ConfigPath(path)
 	if pathErr != nil {
-		return Config{}, nil
+		return Config{}, runtimef("could not determine config path: %v", pathErr)
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -47,11 +55,51 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, usagef("could not read config %s: %v", path, err)
 	}
+	if configTimeoutOverflowsFloat64(data) {
+		return Config{}, timeoutRangeError()
+	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, usagef("invalid config JSON in %s: %v", path, err)
 	}
 	return cfg, nil
+}
+
+func configTimeoutOverflowsFloat64(data []byte) bool {
+	var raw struct {
+		Timeout json.RawMessage `json:"timeout"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil || len(raw.Timeout) == 0 {
+		return false
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(raw.Timeout))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return false
+	}
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	value64, err := strconv.ParseFloat(number.String(), 64)
+	if errors.Is(err, strconv.ErrRange) {
+		return true
+	}
+	return err == nil && value64 == 0 && jsonNumberHasNonzeroMantissa(number.String())
+}
+
+func jsonNumberHasNonzeroMantissa(value string) bool {
+	for i := 0; i < len(value); i++ {
+		switch {
+		case value[i] == 'e' || value[i] == 'E':
+			return false
+		case value[i] >= '1' && value[i] <= '9':
+			return true
+		}
+	}
+	return false
 }
 
 var hostPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -124,6 +172,8 @@ func SaveConfig(path string, cfg Config) (string, error) {
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 3.0
+	} else if err := validateTimeout(cfg.Timeout); err != nil {
+		return "", err
 	}
 	if cfg.MaxVolume == 0 {
 		cfg.MaxVolume = defaultMaxVolume
@@ -154,17 +204,51 @@ func SaveConfig(path string, cfg Config) (string, error) {
 	return path, nil
 }
 
-// ResolveTimeout returns the request timeout in seconds. A non-negative CLI timeout
-// takes precedence; otherwise the config value is used; otherwise 3.0.
+const defaultTimeout = 3.0
+
+var maxTimeoutSeconds = float64(math.MaxInt64) / float64(time.Second)
+
+func timeoutRangeError() error {
+	return usagef(timeoutRangeErrorMessage)
+}
+
+// validateTimeout verifies that seconds can be converted to a positive
+// time.Duration without overflowing. A zero Config.Timeout represents an
+// omitted setting and is handled by resolveTimeout and SaveConfig before this
+// helper is called.
+func validateTimeout(timeout float64) error {
+	if timeout <= 0 || math.IsNaN(timeout) || math.IsInf(timeout, 0) || timeout >= maxTimeoutSeconds {
+		return timeoutRangeError()
+	}
+	// The range check above makes this conversion safe. Check its result as
+	// well: a positive sub-nanosecond value would otherwise truncate to zero.
+	if time.Duration(timeout*float64(time.Second)) <= 0 {
+		return timeoutRangeError()
+	}
+	return nil
+}
+
+// ResolveTimeout validates and returns an explicitly supplied CLI timeout.
+// Callers that need omitted-flag, config, and default selection use
+// resolveTimeout with an explicit presence indicator.
 func ResolveTimeout(cliTimeout float64, cfg Config) (float64, error) {
-	if cliTimeout >= 0 {
-		if cliTimeout == 0 {
-			return 0, usagef("timeout must be a positive number")
+	return resolveTimeout(cliTimeout, true, cfg)
+}
+
+// resolveTimeout is the CLI-aware resolver. cliTimeoutSet distinguishes an
+// absent flag from an explicitly supplied value, including an explicit -1.
+func resolveTimeout(cliTimeout float64, cliTimeoutSet bool, cfg Config) (float64, error) {
+	if cliTimeoutSet {
+		if err := validateTimeout(cliTimeout); err != nil {
+			return 0, err
 		}
 		return cliTimeout, nil
 	}
-	if cfg.Timeout > 0 {
+	if cfg.Timeout != 0 {
+		if err := validateTimeout(cfg.Timeout); err != nil {
+			return 0, err
+		}
 		return cfg.Timeout, nil
 	}
-	return 3.0, nil
+	return defaultTimeout, nil
 }

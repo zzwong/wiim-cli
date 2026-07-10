@@ -123,6 +123,32 @@ func TestNon2xxResponseIsRuntimeError(t *testing.T) {
 	}
 }
 
+func TestClientRejectsOversizedSuccessAndErrorResponses(t *testing.T) {
+	const marker = "oversized-wiim-response"
+	body := marker + strings.Repeat("x", int(wiimAPIResponseLimit)-len(marker)+1)
+	for _, status := range []int{http.StatusOK, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			client := NewClient("host", 3)
+			client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+			})}
+			_, err := client.Command("getStatusEx")
+			if err == nil {
+				t.Fatal("expected oversized response error")
+			}
+			if _, ok := err.(RuntimeError); !ok {
+				t.Fatalf("error type %T, want RuntimeError: %v", err, err)
+			}
+			if !strings.Contains(err.Error(), "response exceeds 1048576 bytes") {
+				t.Fatalf("error %v", err)
+			}
+			if strings.Contains(err.Error(), marker) {
+				t.Fatalf("error reflected oversized body: %v", err)
+			}
+		})
+	}
+}
+
 type testNetError struct {
 	msg       string
 	timeout   bool

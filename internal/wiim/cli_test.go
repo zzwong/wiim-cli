@@ -3,16 +3,24 @@ package wiim
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
 type fakeDevice struct {
-	calls   []string
-	host    string
-	timeout float64
+	calls             []string
+	host              string
+	timeout           float64
+	playerStatus      map[string]any
+	playerStatusCalls int
+	setVolumeValues   []int
+	volume            int
+	volumeSet         bool
 }
 
 func (f *fakeDevice) CastInfo() (map[string]any, error) {
@@ -22,7 +30,15 @@ func (f *fakeDevice) StatusEx() (map[string]any, error) {
 	return map[string]any{"project": "WiiM_Ultra", "firmware": "fw", "internet": "1"}, nil
 }
 func (f *fakeDevice) PlayerStatus() (map[string]any, error) {
-	return map[string]any{"status": "stop", "vol": "38", "mute": "0", "mode": "49"}, nil
+	f.playerStatusCalls++
+	if f.playerStatus != nil {
+		return f.playerStatus, nil
+	}
+	if !f.volumeSet {
+		f.volume = 38
+		f.volumeSet = true
+	}
+	return map[string]any{"status": "stop", "vol": f.volume, "mute": "0", "mode": "49"}, nil
 }
 func (f *fakeDevice) MetaInfo() map[string]any {
 	return map[string]any{"metaData": map[string]any{"title": "Song"}}
@@ -31,7 +47,13 @@ func (f *fakeDevice) Command(c string) (any, error) {
 	f.calls = append(f.calls, "raw:"+c)
 	return map[string]any{"command": c}, nil
 }
-func (f *fakeDevice) SetVolume(_ int) error   { f.calls = append(f.calls, "vol"); return nil }
+func (f *fakeDevice) SetVolume(v int) error {
+	f.calls = append(f.calls, "vol")
+	f.setVolumeValues = append(f.setVolumeValues, v)
+	f.volume = v
+	f.volumeSet = true
+	return nil
+}
 func (f *fakeDevice) VolumeUp(_ int) error    { f.calls = append(f.calls, "up"); return nil }
 func (f *fakeDevice) VolumeDown(_ int) error  { f.calls = append(f.calls, "down"); return nil }
 func (f *fakeDevice) Mute(_ bool) error       { f.calls = append(f.calls, "mute"); return nil }
@@ -52,7 +74,7 @@ func (f *fakeDevice) SwitchInput(input string) error {
 
 func withFake(t *testing.T) (*fakeDevice, func()) {
 	t.Helper()
-	fd := &fakeDevice{}
+	fd := &fakeDevice{volume: 38}
 	old := newDevice
 	newDevice = func(host string, timeout float64) device {
 		fd.host = host
@@ -60,6 +82,27 @@ func withFake(t *testing.T) (*fakeDevice, func()) {
 		return fd
 	}
 	return fd, func() { newDevice = old }
+}
+
+type fakeCastMediaStatus struct {
+	calls   int
+	host    string
+	timeout float64
+	info    CastMediaInfo
+	err     error
+}
+
+func withFakeCastMediaStatus(t *testing.T) (*fakeCastMediaStatus, func()) {
+	t.Helper()
+	fc := &fakeCastMediaStatus{info: CastMediaInfo{App: "CastApp", Title: "Song"}}
+	old := castMediaStatusFunc
+	castMediaStatusFunc = func(host string, timeout float64) (CastMediaInfo, error) {
+		fc.calls++
+		fc.host = host
+		fc.timeout = timeout
+		return fc.info, fc.err
+	}
+	return fc, func() { castMediaStatusFunc = old }
 }
 
 func runTest(args ...string) (int, string, string) {
@@ -185,6 +228,74 @@ func TestDiscoverCommandRejectsZeroTimeout(t *testing.T) {
 	code, _, errText := runTest("--timeout", "0", "discover")
 	if code != 2 || !strings.Contains(errText, "timeout must be") {
 		t.Fatalf("code %d err %q", code, errText)
+	}
+}
+
+func TestCastNowUsesDefaultTimeout(t *testing.T) {
+	fake, done := withFakeCastMediaStatus(t)
+	defer done()
+
+	code, out, errText := runTest("--host", "cast.local", "cast-now")
+	if code != 0 {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	if fake.calls != 1 || fake.host != "cast.local" || fake.timeout != 3.0 {
+		t.Fatalf("capture = %+v", fake)
+	}
+	if !strings.Contains(out, "App: CastApp") || !strings.Contains(out, "Title: Song") {
+		t.Fatalf("output %q", out)
+	}
+}
+
+func TestCastNowUsesConfigTimeout(t *testing.T) {
+	t.Setenv("WIIM_HOST", "")
+	fake, done := withFakeCastMediaStatus(t)
+	defer done()
+
+	cfgPath := t.TempDir() + "/config.json"
+	if err := os.WriteFile(cfgPath, []byte(`{"defaultHost":"cfg-host","timeout":7}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, errText := runTest("--config", cfgPath, "cast-now")
+	if code != 0 {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	if fake.calls != 1 || fake.host != "cfg-host" || fake.timeout != 7 {
+		t.Fatalf("capture = %+v", fake)
+	}
+}
+
+func TestCastNowExplicitTimeoutPrecedence(t *testing.T) {
+	t.Setenv("WIIM_HOST", "")
+	fake, done := withFakeCastMediaStatus(t)
+	defer done()
+
+	cfgPath := t.TempDir() + "/config.json"
+	if err := os.WriteFile(cfgPath, []byte(`{"defaultHost":"cfg-host","timeout":7}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, errText := runTest("--config", cfgPath, "--timeout", "2.5", "cast-now")
+	if code != 0 {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	if fake.calls != 1 || fake.host != "cfg-host" || fake.timeout != 2.5 {
+		t.Fatalf("capture = %+v", fake)
+	}
+}
+
+func TestCastNowErrorPropagation(t *testing.T) {
+	fake, done := withFakeCastMediaStatus(t)
+	defer done()
+	fake.err = errors.New("cast boom")
+
+	code, _, errText := runTest("--host", "cast.local", "cast-now")
+	if code == 0 || !strings.Contains(errText, "cast boom") {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	if fake.calls != 1 || fake.host != "cast.local" || fake.timeout != 3.0 {
+		t.Fatalf("capture = %+v", fake)
 	}
 }
 
@@ -320,20 +431,22 @@ func TestNow(t *testing.T) {
 }
 
 func TestVolumeGetSetAndMaxVolume(t *testing.T) {
-	_, done := withFake(t)
+	fd, done := withFake(t)
 	defer done()
 	code, out, _ := runTest("--host", "1.2.3.4", "volume")
 	if code != 0 || strings.TrimSpace(out) != "38" {
 		t.Fatalf("code %d out %q", code, out)
 	}
 	code, out, _ = runTest("--host", "1.2.3.4", "volume", "30")
-	if code != 0 || !strings.Contains(out, "Volume set to 30") {
-		t.Fatalf("code %d out %q", code, out)
+	if code != 0 || !strings.Contains(out, "Volume set to 30") || len(fd.setVolumeValues) == 0 || fd.setVolumeValues[len(fd.setVolumeValues)-1] != 30 {
+		t.Fatalf("code %d out %q set=%v", code, out, fd.setVolumeValues)
 	}
 	code, _, errText := runTest("--host", "1.2.3.4", "volume", "60")
 	if code != 2 || !strings.Contains(errText, "maxVolume 55") {
 		t.Fatalf("code %d err %q", code, errText)
 	}
+	fd.volume = 38
+	fd.volumeSet = false
 	code, _, errText = runTest("--host", "1.2.3.4", "volume", "+20")
 	if code != 2 || !strings.Contains(errText, "maxVolume 55") {
 		t.Fatalf("code %d err %q", code, errText)
@@ -343,21 +456,45 @@ func TestVolumeGetSetAndMaxVolume(t *testing.T) {
 func TestVolumeAllowsSignedRelativeValues(t *testing.T) {
 	fd, done := withFake(t)
 	defer done()
+
+	startStatus := fd.playerStatusCalls
+	startSet := len(fd.setVolumeValues)
 	code, out, errText := runTest("--host", "1.2.3.4", "volume", "+5")
-	if code != 0 || !strings.Contains(out, "Volume increased by 5") || fd.calls[len(fd.calls)-1] != "up" {
-		t.Fatalf("code %d out %q err %q calls %#v", code, out, errText, fd.calls)
+	if code != 0 || !strings.Contains(out, "Volume increased by 5") {
+		t.Fatalf("code %d out %q err %q", code, out, errText)
 	}
+	if fd.playerStatusCalls != startStatus+1 || len(fd.setVolumeValues) != startSet+1 || fd.setVolumeValues[startSet] != 43 {
+		t.Fatalf("status=%d set=%v calls=%#v", fd.playerStatusCalls-startStatus, fd.setVolumeValues[startSet:], fd.calls)
+	}
+
+	startStatus = fd.playerStatusCalls
+	startSet = len(fd.setVolumeValues)
 	code, out, errText = runTest("--host", "1.2.3.4", "volume", "-5")
-	if code != 0 || !strings.Contains(out, "Volume decreased by 5") || fd.calls[len(fd.calls)-1] != "down" {
-		t.Fatalf("code %d out %q err %q calls %#v", code, out, errText, fd.calls)
+	if code != 0 || !strings.Contains(out, "Volume decreased by 5") {
+		t.Fatalf("code %d out %q err %q", code, out, errText)
 	}
+	if fd.playerStatusCalls != startStatus+1 || len(fd.setVolumeValues) != startSet+1 || fd.setVolumeValues[startSet] != 38 {
+		t.Fatalf("status=%d set=%v calls=%#v", fd.playerStatusCalls-startStatus, fd.setVolumeValues[startSet:], fd.calls)
+	}
+
+	startStatus = fd.playerStatusCalls
+	startSet = len(fd.setVolumeValues)
 	code, out, errText = runTest("volume", "-5", "--host", "1.2.3.4")
 	if code != 0 || !strings.Contains(out, "Volume decreased by 5") {
 		t.Fatalf("code %d out %q err %q", code, out, errText)
 	}
+	if fd.playerStatusCalls != startStatus+1 || len(fd.setVolumeValues) != startSet+1 || fd.setVolumeValues[startSet] != 33 {
+		t.Fatalf("status=%d set=%v calls=%#v", fd.playerStatusCalls-startStatus, fd.setVolumeValues[startSet:], fd.calls)
+	}
+
+	startStatus = fd.playerStatusCalls
+	startSet = len(fd.setVolumeValues)
 	code, out, errText = runTest("--host", "1.2.3.4", "volume", "--", "-5")
 	if code != 0 || !strings.Contains(out, "Volume decreased by 5") {
 		t.Fatalf("code %d out %q err %q", code, out, errText)
+	}
+	if fd.playerStatusCalls != startStatus+1 || len(fd.setVolumeValues) != startSet+1 || fd.setVolumeValues[startSet] != 28 {
+		t.Fatalf("status=%d set=%v calls=%#v", fd.playerStatusCalls-startStatus, fd.setVolumeValues[startSet:], fd.calls)
 	}
 }
 
@@ -530,5 +667,213 @@ func TestResolveHostFromConfig(t *testing.T) {
 	host, err := ResolveHost("", cfg)
 	if err != nil || host != "cfg-host" {
 		t.Fatalf("host %s err %v", host, err)
+	}
+}
+
+func TestRunRejectsInvalidCLITimeoutsBeforeExternalCalls(t *testing.T) {
+	oldDevice := newDevice
+	oldCast := castMediaStatusFunc
+	oldSearch := ssdpSearchFunc
+	defer func() {
+		newDevice = oldDevice
+		castMediaStatusFunc = oldCast
+		ssdpSearchFunc = oldSearch
+	}()
+
+	deviceCalls, castCalls, discoveryCalls := 0, 0, 0
+	newDevice = func(_ string, _ float64) device {
+		deviceCalls++
+		return &fakeDevice{}
+	}
+	castMediaStatusFunc = func(_ string, _ float64) (CastMediaInfo, error) {
+		castCalls++
+		return CastMediaInfo{}, nil
+	}
+	ssdpSearchFunc = func(_ time.Duration) ([]string, error) {
+		discoveryCalls++
+		return nil, nil
+	}
+
+	for _, timeout := range []string{"0", "-1", "1e-10", "NaN", "+Inf", "1e100"} {
+		t.Run(timeout, func(t *testing.T) {
+			for _, args := range [][]string{
+				{"--host", "wiim.local", "--timeout", timeout, "status"},
+				{"--host", "wiim.local", "--timeout", timeout, "cast-now"},
+				{"--timeout", timeout, "discover"},
+			} {
+				code, _, errText := runTest(args...)
+				if code != 2 || errText != "wiim: timeout must be a positive number within the supported duration range" {
+					t.Fatalf("args %q: code %d err %q", args, code, errText)
+				}
+				if deviceCalls != 0 || castCalls != 0 || discoveryCalls != 0 {
+					t.Fatalf("args %q made external calls: device=%d cast=%d discovery=%d", args, deviceCalls, castCalls, discoveryCalls)
+				}
+			}
+		})
+	}
+}
+
+func TestRunRejectsInvalidConfigTimeoutBeforeExternalCalls(t *testing.T) {
+	oldDevice := newDevice
+	oldCast := castMediaStatusFunc
+	oldSearch := ssdpSearchFunc
+	defer func() {
+		newDevice = oldDevice
+		castMediaStatusFunc = oldCast
+		ssdpSearchFunc = oldSearch
+	}()
+
+	deviceCalls, castCalls, discoveryCalls := 0, 0, 0
+	newDevice = func(_ string, _ float64) device { deviceCalls++; return &fakeDevice{} }
+	castMediaStatusFunc = func(_ string, _ float64) (CastMediaInfo, error) { castCalls++; return CastMediaInfo{}, nil }
+	ssdpSearchFunc = func(_ time.Duration) ([]string, error) { discoveryCalls++; return nil, nil }
+
+	for _, timeout := range []string{"-1", "1e-10", "1e100"} {
+		t.Run(timeout, func(t *testing.T) {
+			path := t.TempDir() + "/config.json"
+			if err := os.WriteFile(path, []byte(`{"defaultHost":"wiim.local","timeout":`+timeout+`}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{
+				{"--config", path, "status"},
+				{"--config", path, "cast-now"},
+				{"--config", path, "discover"},
+			} {
+				code, _, errText := runTest(args...)
+				if code != 2 || errText != "wiim: timeout must be a positive number within the supported duration range" {
+					t.Fatalf("args %q: code %d err %q", args, code, errText)
+				}
+				if deviceCalls != 0 || castCalls != 0 || discoveryCalls != 0 {
+					t.Fatalf("args %q made external calls: device=%d cast=%d discovery=%d", args, deviceCalls, castCalls, discoveryCalls)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigSetRejectsInvalidTimeout(t *testing.T) {
+	for _, timeout := range []string{"0", "-1", "1e-10", "NaN", "+Inf", "1e100"} {
+		t.Run(timeout, func(t *testing.T) {
+			path := t.TempDir() + "/config.json"
+			code, _, errText := runTest("--config", path, "config", "set", "timeout", "--", timeout)
+			if code != 2 || errText != "wiim: timeout must be a positive number within the supported duration range" {
+				t.Fatalf("code %d err %q", code, errText)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("config was persisted after rejected timeout: %v", err)
+			}
+		})
+	}
+}
+
+func TestSetupRejectsInvalidTimeoutBeforePersistence(t *testing.T) {
+	for _, timeout := range []string{"0", "-1", "1e-10", "NaN", "+Inf", "1e100"} {
+		t.Run(timeout, func(t *testing.T) {
+			path := t.TempDir() + "/config.json"
+			code, _, errText := runTest("--config", path, "--host", "wiim.local", "--timeout", timeout, "setup")
+			if code != 2 || errText != "wiim: timeout must be a positive number within the supported duration range" {
+				t.Fatalf("code %d err %q", code, errText)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("config was persisted after rejected timeout: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunAcceptsLargestSupportedTimeout(t *testing.T) {
+	fd, done := withFake(t)
+	defer done()
+
+	timeout := math.Nextafter(maxTimeoutSeconds, 0)
+	value := strconv.FormatFloat(timeout, 'g', -1, 64)
+	code, _, errText := runTest("--host", "wiim.local", "--timeout", value, "status")
+	if code != 0 || fd.timeout != timeout {
+		t.Fatalf("code %d err %q timeout %v, want %v", code, errText, fd.timeout, timeout)
+	}
+}
+
+func TestRunRejectsMalformedTimeoutWithUsageError(t *testing.T) {
+	for _, args := range [][]string{
+		{"--timeout", "not-a-number", "version"},
+		{"volume", "--timeout", "not-a-number"},
+		{"config", "set", "timeout", "not-a-number"},
+	} {
+		code, _, errText := runTest(args...)
+		if code != 2 || errText != `wiim: invalid timeout "not-a-number"` {
+			t.Fatalf("args %q: code %d err %q", args, code, errText)
+		}
+	}
+}
+
+func TestRunDistinguishesMissingTimeoutFromUnknownFlag(t *testing.T) {
+	code, _, errText := runTest("--timeout")
+	if code != 2 || errText != "wiim: flag --timeout requires a value" {
+		t.Fatalf("missing timeout: code %d err %q", code, errText)
+	}
+
+	code, _, errText = runTest("--timeout-extra")
+	if code != 1 || errText != "unknown flag: --timeout-extra" {
+		t.Fatalf("unknown timeout flag: code %d err %q", code, errText)
+	}
+}
+
+func TestRunRejectsOutOfRangeNumericTimeoutWithUsageError(t *testing.T) {
+	const want = "timeout must be a positive number within the supported duration range"
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "persistent flag", args: []string{"--timeout", "1e1000", "version"}},
+		{name: "volume parser", args: []string{"volume", "--timeout", "-1e1000"}},
+		{name: "config set", args: []string{"--config", t.TempDir() + "/config.json", "config", "set", "timeout", "--", "1e1000"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := Run(tc.args, &stdout, &stderr)
+			if ExitCode(err) != 2 {
+				t.Fatalf("exit code = %d, want 2", ExitCode(err))
+			}
+			usageErr, ok := err.(UsageError)
+			if !ok {
+				t.Fatalf("error type %T, want UsageError: %v", err, err)
+			}
+			if usageErr.Msg != want {
+				t.Fatalf("error message = %q, want %q", usageErr.Msg, want)
+			}
+			if got := strings.TrimSpace(stderr.String()); got != "wiim: "+want {
+				t.Fatalf("stderr = %q, want %q", got, "wiim: "+want)
+			}
+		})
+	}
+}
+
+func TestRunRejectsExplicitInvalidTimeoutOnNonResolvingCommands(t *testing.T) {
+	commands := [][]string{
+		{"spotify", "logout"},
+		{"config", "show"},
+		{"config", "path"},
+		{"config", "set", "maxVolume", "55"},
+		{"config", "unset", "maxVolume"},
+		{"version"},
+	}
+	for _, command := range commands {
+		args := append([]string{"--timeout", "-1"}, command...)
+		code, _, errText := runTest(args...)
+		if code != 2 || errText != "wiim: timeout must be a positive number within the supported duration range" {
+			t.Fatalf("args %q: code %d err %q", args, code, errText)
+		}
+	}
+}
+
+func TestConfigShowRejectsPersistedInvalidTimeout(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	if err := os.WriteFile(path, []byte(`{"timeout":1e-10}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errText := runTest("--config", path, "config", "show")
+	if code != 2 || out != "" || errText != "wiim: timeout must be a positive number within the supported duration range" {
+		t.Fatalf("code %d out %q err %q", code, out, errText)
 	}
 }

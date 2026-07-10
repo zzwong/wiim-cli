@@ -1,14 +1,17 @@
 package wiim
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 type options struct {
@@ -18,6 +21,48 @@ type options struct {
 	asJSON  bool
 }
 
+// timeoutValue keeps normal Cobra flag parsing aligned with the hand-rolled
+// volume parser: malformed values and syntactically valid but unusable values
+// are both UsageErrors rather than generic pflag errors.
+type timeoutValue struct {
+	destination *float64
+	err         error
+}
+
+func parseTimeout(value string) (float64, error) {
+	timeout, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		if numErr, ok := err.(*strconv.NumError); ok && numErr.Err == strconv.ErrRange {
+			return 0, timeoutRangeError()
+		}
+		return 0, usagef("invalid timeout %q", value)
+	}
+	if err := validateTimeout(timeout); err != nil {
+		return 0, err
+	}
+	return timeout, nil
+}
+
+func (v *timeoutValue) Set(value string) error {
+	timeout, err := parseTimeout(value)
+	if err != nil {
+		v.err = err
+		return err
+	}
+	*v.destination = timeout
+	v.err = nil
+	return nil
+}
+
+func (v *timeoutValue) String() string {
+	if v == nil || v.destination == nil {
+		return ""
+	}
+	return strconv.FormatFloat(*v.destination, 'g', -1, 64)
+}
+
+func (*timeoutValue) Type() string { return "float64" }
+
 type device interface {
 	CastInfo() (map[string]any, error)
 	StatusEx() (map[string]any, error)
@@ -25,8 +70,6 @@ type device interface {
 	MetaInfo() map[string]any
 	Command(string) (any, error)
 	SetVolume(int) error
-	VolumeUp(int) error
-	VolumeDown(int) error
 	Mute(bool) error
 	Playback(string) error
 	PlayURL(string) error
@@ -39,6 +82,7 @@ type device interface {
 }
 
 var newDevice = func(host string, timeout float64) device { return NewClient(host, timeout) }
+var castMediaStatusFunc = CastMediaStatus
 
 // Run parses command-line arguments, loads configuration, connects to the WiiM
 // device, and dispatches the requested subcommand. On failure it writes the
@@ -81,14 +125,15 @@ func argsRequestJSON(args []string) bool {
 }
 
 type app struct {
-	root   *cobra.Command
-	opts   options
-	stdout io.Writer
-	stderr io.Writer
+	root        *cobra.Command
+	opts        options
+	timeoutFlag *timeoutValue
+	stdout      io.Writer
+	stderr      io.Writer
 }
 
 func newApp(stdout, stderr io.Writer) *app {
-	a := &app{stdout: stdout, stderr: stderr}
+	a := &app{opts: options{timeout: defaultTimeout}, stdout: stdout, stderr: stderr}
 	root := &cobra.Command{
 		Use:           "wiim",
 		Short:         "Control and inspect a WiiM device on the local network",
@@ -98,9 +143,21 @@ func newApp(stdout, stderr io.Writer) *app {
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.PersistentFlags().StringVar(&a.opts.host, "host", "", "WiiM host or IP address; setup saves it as defaultHost")
-	root.PersistentFlags().Float64Var(&a.opts.timeout, "timeout", 3.0, "request timeout in seconds")
+	a.timeoutFlag = &timeoutValue{destination: &a.opts.timeout}
+	root.PersistentFlags().Var(a.timeoutFlag, "timeout", "request timeout in seconds")
 	root.PersistentFlags().StringVar(&a.opts.config, "config", "", "path to config JSON")
 	root.PersistentFlags().BoolVar(&a.opts.asJSON, "json", false, "emit JSON where supported")
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		if a.timeoutFlag.err != nil {
+			return a.timeoutFlag.err
+		}
+		var valueRequired *pflag.ValueRequiredError
+		if errors.As(err, &valueRequired) && valueRequired.GetFlag() != nil &&
+			valueRequired.GetFlag().Name == "timeout" && valueRequired.GetSpecifiedName() == "timeout" {
+			return usagef("flag --timeout requires a value")
+		}
+		return err
+	})
 	a.root = root
 	a.addCommands()
 	return a
@@ -205,9 +262,9 @@ func (a *app) runVolumeCommand(cmd *cobra.Command, args []string) error {
 }
 
 func (a *app) setTimeoutFlag(value string) error {
-	timeout, err := strconv.ParseFloat(value, 64)
+	timeout, err := parseTimeout(value)
 	if err != nil {
-		return usagef("invalid timeout %q", value)
+		return err
 	}
 	a.opts.timeout = timeout
 	if flag := a.root.PersistentFlags().Lookup("timeout"); flag != nil {
@@ -295,11 +352,11 @@ func (a *app) spotifyReauthCommand(use, short string, argsFn cobra.PositionalArg
 
 func (a *app) loadConfig() (Config, error) { return LoadConfig(a.opts.config) }
 
-func (a *app) cliTimeout() float64 {
+func (a *app) cliTimeout() (float64, bool) {
 	if flag := a.root.PersistentFlags().Lookup("timeout"); flag != nil && flag.Changed {
-		return a.opts.timeout
+		return a.opts.timeout, true
 	}
-	return -1
+	return 0, false
 }
 
 func (a *app) runDevice(args []string) error {
@@ -307,7 +364,8 @@ func (a *app) runDevice(args []string) error {
 	if err != nil {
 		return err
 	}
-	timeout, err := ResolveTimeout(a.cliTimeout(), cfg)
+	cliTimeout, cliTimeoutSet := a.cliTimeout()
+	timeout, err := resolveTimeout(cliTimeout, cliTimeoutSet, cfg)
 	if err != nil {
 		return err
 	}
@@ -315,7 +373,9 @@ func (a *app) runDevice(args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := dispatch(args, a.opts, host, newDevice(host, timeout), cfg, os.Stdin, a.stdout)
+	resolvedOpts := a.opts
+	resolvedOpts.timeout = timeout
+	out, err := dispatch(args, resolvedOpts, host, newDevice(host, timeout), cfg, os.Stdin, a.stdout)
 	if err != nil {
 		return err
 	}
@@ -346,7 +406,11 @@ func (a *app) runSetup(_ *cobra.Command, _ []string) error {
 		return err
 	}
 	opts := a.opts
-	if a.cliTimeout() < 0 {
+	cliTimeout, cliTimeoutSet := a.cliTimeout()
+	if _, err := resolveTimeout(cliTimeout, cliTimeoutSet, cfg); err != nil {
+		return err
+	}
+	if !cliTimeoutSet {
 		opts.timeout = 0
 	}
 	out, err := dispatchSetup(nil, opts, cfg)
@@ -366,7 +430,7 @@ func (a *app) runVersion(_ *cobra.Command, _ []string) error {
 // host at all, so --host/config-file host resolution don't apply. It does
 // still resolve --timeout the same way every other command does (flag →
 // config file's timeout → 3.0 default, with an explicit 0 rejected as a
-// usage error by ResolveTimeout) — repurposed here as "how long to wait for
+// usage error by resolveTimeout) — repurposed here as "how long to wait for
 // SSDP responses" rather than a per-request HTTP timeout, but resolved
 // consistently rather than silently ignoring a configured default.
 func (a *app) runDiscover(_ *cobra.Command, _ []string) error {
@@ -374,7 +438,8 @@ func (a *app) runDiscover(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	timeout, err := ResolveTimeout(a.cliTimeout(), cfg)
+	cliTimeout, cliTimeoutSet := a.cliTimeout()
+	timeout, err := resolveTimeout(cliTimeout, cliTimeoutSet, cfg)
 	if err != nil {
 		return err
 	}
@@ -393,7 +458,7 @@ func (a *app) runDiscover(_ *cobra.Command, _ []string) error {
 func (a *app) runConfigPath(_ *cobra.Command, _ []string) error {
 	path, err := ConfigPath(a.opts.config)
 	if err != nil {
-		return err
+		return runtimef("could not determine config path: %v", err)
 	}
 	fmt.Fprintln(a.stdout, path)
 	return nil
@@ -411,7 +476,9 @@ func (a *app) runConfigShow(_ *cobra.Command, _ []string) error {
 		cfg.SpotifyRedirectURI = defaultSpotifyRedirectURI
 	}
 	if cfg.Timeout == 0 {
-		cfg.Timeout = 3.0
+		cfg.Timeout = defaultTimeout
+	} else if err := validateTimeout(cfg.Timeout); err != nil {
+		return err
 	}
 	out, err := jsonText(cfg)
 	if err != nil {
@@ -460,9 +527,9 @@ func (a *app) runConfigSet(_ *cobra.Command, args []string) error {
 		}
 		cfg.DefaultHost = value
 	case "timeout":
-		v, err := strconv.ParseFloat(value, 64)
-		if err != nil || v <= 0 {
-			return usagef("timeout must be a positive number")
+		v, err := parseTimeout(value)
+		if err != nil {
+			return err
 		}
 		cfg.Timeout = v
 	case "maxVolume":
@@ -515,11 +582,7 @@ func dispatch(args []string, opts options, host string, client device, cfg Confi
 	case "input":
 		return dispatchInput(args, opts, client)
 	case "cast-now":
-		timeout, err := ResolveTimeout(opts.timeout, cfg)
-		if err != nil {
-			return "", err
-		}
-		info, err := CastMediaStatus(host, timeout)
+		info, err := castMediaStatusFunc(host, opts.timeout)
 		if err != nil {
 			return "", err
 		}
@@ -672,30 +735,109 @@ func dispatchVolume(args []string, opts options, cfg Config, client device) (str
 		}
 		return fmt.Sprintf("Volume set to %d", amount), nil
 	}
+	player, err := client.PlayerStatus()
+	if err != nil {
+		return "", err
+	}
+	current, err := validatedReportedVolume(player)
+	if err != nil {
+		return "", err
+	}
+	var target int
+	volumeDelta := amount
 	if mode == "up" {
-		player, err := client.PlayerStatus()
-		if err != nil {
-			return "", err
-		}
-		current := intPtr(player["vol"])
-		if current != nil && *current+amount > maxVolume {
+		if current > maxVolume || amount > maxVolume-current {
 			return "", usagef("relative volume would exceed configured maxVolume %d", maxVolume)
 		}
-		if err := client.VolumeUp(amount); err != nil {
-			return "", err
+		target = current + amount
+	} else {
+		if amount >= current {
+			target = 0
+		} else {
+			target = current - amount
 		}
-		if opts.asJSON {
-			return FormatRaw(map[string]any{"volumeDelta": amount})
-		}
-		return fmt.Sprintf("Volume increased by %d", amount), nil
+		volumeDelta = -amount
 	}
-	if err := client.VolumeDown(amount); err != nil {
+	if err := client.SetVolume(target); err != nil {
 		return "", err
 	}
 	if opts.asJSON {
-		return FormatRaw(map[string]any{"volumeDelta": -amount})
+		return FormatRaw(map[string]any{"volumeDelta": volumeDelta})
+	}
+	if mode == "up" {
+		return fmt.Sprintf("Volume increased by %d", amount), nil
 	}
 	return fmt.Sprintf("Volume decreased by %d", amount), nil
+}
+
+// validatedReportedVolume verifies that the volume supplied by the device is
+// an integer in the range accepted by SetVolume. The device normally reports
+// its JSON value as a string, while tests and other callers may supply numeric
+// values directly.
+func validatedReportedVolume(player map[string]any) (int, error) {
+	value, ok := player["vol"]
+	if !ok || value == nil {
+		return 0, runtimef("device did not report a valid current volume")
+	}
+
+	var volume int
+	switch value := value.(type) {
+	case string:
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return 0, runtimef("device did not report a valid current volume")
+		}
+		volume = parsed
+	case int:
+		volume = value
+	case int8:
+		volume = int(value)
+	case int16:
+		volume = int(value)
+	case int32:
+		volume = int(value)
+	case int64:
+		if value < 0 || value > 100 {
+			return 0, runtimef("device did not report a valid current volume")
+		}
+		volume = int(value)
+	case uint:
+		if value > 100 {
+			return 0, runtimef("device did not report a valid current volume")
+		}
+		volume = int(value)
+	case uint8:
+		volume = int(value)
+	case uint16:
+		volume = int(value)
+	case uint32:
+		if value > 100 {
+			return 0, runtimef("device did not report a valid current volume")
+		}
+		volume = int(value)
+	case uint64:
+		if value > 100 {
+			return 0, runtimef("device did not report a valid current volume")
+		}
+		volume = int(value)
+	case float32:
+		floatVolume := float64(value)
+		if math.IsNaN(floatVolume) || math.IsInf(floatVolume, 0) || math.Trunc(floatVolume) != floatVolume || floatVolume < 0 || floatVolume > 100 {
+			return 0, runtimef("device did not report a valid current volume")
+		}
+		volume = int(value)
+	case float64:
+		if math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value || value < 0 || value > 100 {
+			return 0, runtimef("device did not report a valid current volume")
+		}
+		volume = int(value)
+	default:
+		return 0, runtimef("device did not report a valid current volume")
+	}
+	if volume < 0 || volume > 100 {
+		return 0, runtimef("device did not report a valid current volume")
+	}
+	return volume, nil
 }
 
 func parseVolume(value string) (string, int, error) {

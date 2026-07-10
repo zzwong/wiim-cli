@@ -164,7 +164,7 @@ func (s *SpotifyClient) request(method, path string, body any) (any, error) {
 		return nil, runtimef("Spotify API request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := readLimitedResponse(resp.Body, spotifyAPIResponseLimit)
 	if err != nil {
 		return nil, runtimef("could not read Spotify API response: %v", err)
 	}
@@ -429,9 +429,9 @@ func spotifyTokenRequest(clientID, clientSecret string, values url.Values, fallb
 		return spotifyTokenCache{}, runtimef("Spotify token request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := readLimitedResponse(resp.Body, spotifyTokenResponseLimit)
 	if err != nil {
-		return spotifyTokenCache{}, err
+		return spotifyTokenCache{}, runtimef("could not read Spotify token response: %v", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return spotifyTokenCache{}, runtimef("Spotify token endpoint returned HTTP %d: %s", resp.StatusCode, responseSnippet(strings.TrimSpace(string(data))))

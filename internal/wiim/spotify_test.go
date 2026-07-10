@@ -622,3 +622,62 @@ func TestSpotifyURI(t *testing.T) {
 		}
 	}
 }
+
+func TestSpotifyAPIRejectsOversizedSuccessAndErrorResponses(t *testing.T) {
+	setupSpotifyTest(t)
+	const marker = "oversized-spotify-api-response"
+	body := marker + strings.Repeat("x", int(spotifyAPIResponseLimit)-len(marker)+1)
+	for _, status := range []int{http.StatusOK, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+			spotifyAPIBaseURL = server.URL
+			client := &SpotifyClient{Token: "token", HTTPClient: server.Client()}
+			_, err := client.request(http.MethodGet, "/anything", nil)
+			if err == nil {
+				t.Fatal("expected oversized response error")
+			}
+			if _, ok := err.(RuntimeError); !ok {
+				t.Fatalf("error type %T, want RuntimeError: %v", err, err)
+			}
+			if !strings.Contains(err.Error(), "response exceeds 1048576 bytes") {
+				t.Fatalf("error %v", err)
+			}
+			if strings.Contains(err.Error(), marker) {
+				t.Fatalf("error reflected oversized body: %v", err)
+			}
+		})
+	}
+}
+
+func TestSpotifyTokenRejectsOversizedSuccessAndErrorResponses(t *testing.T) {
+	setupSpotifyTest(t)
+	const marker = "oversized-spotify-token-response"
+	body := marker + strings.Repeat("x", int(spotifyTokenResponseLimit)-len(marker)+1)
+	for _, status := range []int{http.StatusOK, http.StatusBadRequest} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+			spotifyAccountsBaseURL = server.URL
+			_, err := exchangeSpotifyCode("id", "secret", "code", defaultSpotifyRedirectURI)
+			if err == nil {
+				t.Fatal("expected oversized response error")
+			}
+			if _, ok := err.(RuntimeError); !ok {
+				t.Fatalf("error type %T, want RuntimeError: %v", err, err)
+			}
+			if !strings.Contains(err.Error(), "response exceeds 65536 bytes") {
+				t.Fatalf("error %v", err)
+			}
+			if strings.Contains(err.Error(), marker) {
+				t.Fatalf("error reflected oversized body: %v", err)
+			}
+		})
+	}
+}

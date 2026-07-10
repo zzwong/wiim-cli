@@ -12,6 +12,8 @@ const (
 	defaultMaxVolume          = 55
 )
 
+var userHomeDir = os.UserHomeDir
+
 // Config holds persistent settings for connecting to a WiiM device.
 type Config struct {
 	DefaultHost        string  `json:"defaultHost"`
@@ -26,7 +28,7 @@ func ConfigPath(path string) (string, error) {
 	if path != "" {
 		return path, nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := userHomeDir()
 	if err != nil {
 		return "", err
 	}
@@ -38,7 +40,7 @@ func ConfigPath(path string) (string, error) {
 func LoadConfig(path string) (Config, error) {
 	path, pathErr := ConfigPath(path)
 	if pathErr != nil {
-		return Config{}, nil
+		return Config{}, runtimef("could not determine config path: %v", pathErr)
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {

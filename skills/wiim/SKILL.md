@@ -63,6 +63,7 @@ wiim --host <wiim-host> play-m3u <url>
 wiim --host <wiim-host> prompt-url <url>
 wiim --host <wiim-host> play-file <path>
 wiim --host <wiim-host> preset play <n>
+wiim cliamp handoff
 wiim spotify play <spotify-uri-or-url> [device-id]
 wiim spotify transfer <spotify-device-id>
 ```
@@ -99,7 +100,9 @@ wiim cliamp status
 wiim cliamp handoff
 ```
 
-`cliamp handoff` only works directly for HTTP/HTTPS URLs. Local files need `play-file`; Spotify needs Spotify Connect commands.
+`cliamp status` is read-only. `cliamp handoff` starts playback on the WiiM and is a
+mutating playback command that requires explicit user permission. It only works directly
+for HTTP/HTTPS URLs. Local files need `play-file`; Spotify needs Spotify Connect commands.
 
 ## Other commands
 
@@ -142,7 +145,10 @@ wiim spotify logout
 
 ## Raw exploration
 
-Use `raw` to inspect or verify endpoints:
+> **Warning:** `raw` can send mutating API commands, not just inspect the device. Use it
+> only with known read-only endpoints unless the user explicitly authorizes the mutation.
+
+Use `raw` to inspect or verify known read-only endpoints:
 
 ```bash
 wiim --host <wiim-host> raw getStatusEx

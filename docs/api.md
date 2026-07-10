@@ -240,6 +240,7 @@ Spotify commands are separate from the WiiM HTTP API. They use Spotify's Web API
 
 ```bash
 wiim spotify credentials set
+wiim spotify credentials set-secret
 wiim spotify credentials import-clipboard id
 wiim spotify credentials import-clipboard secret
 wiim spotify credentials status

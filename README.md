@@ -185,7 +185,6 @@ wiim cliamp handoff
 # Utility
 wiim raw getStatusEx
 wiim version
-wiim completion bash        # also: fish, zsh, powershell
 ```
 
 Global options (`--host`, `--device`, `--timeout`, `--config`, `--json`) work before or after

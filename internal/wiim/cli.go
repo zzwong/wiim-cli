@@ -39,6 +39,7 @@ type device interface {
 }
 
 var newDevice = func(host string, timeout float64) device { return NewClient(host, timeout) }
+var castMediaStatusFunc = CastMediaStatus
 
 // Run parses command-line arguments, loads configuration, connects to the WiiM
 // device, and dispatches the requested subcommand. On failure it writes the
@@ -315,7 +316,9 @@ func (a *app) runDevice(args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := dispatch(args, a.opts, host, newDevice(host, timeout), cfg, os.Stdin, a.stdout)
+	resolvedOpts := a.opts
+	resolvedOpts.timeout = timeout
+	out, err := dispatch(args, resolvedOpts, host, newDevice(host, timeout), cfg, os.Stdin, a.stdout)
 	if err != nil {
 		return err
 	}
@@ -515,11 +518,7 @@ func dispatch(args []string, opts options, host string, client device, cfg Confi
 	case "input":
 		return dispatchInput(args, opts, client)
 	case "cast-now":
-		timeout, err := ResolveTimeout(opts.timeout, cfg)
-		if err != nil {
-			return "", err
-		}
-		info, err := CastMediaStatus(host, timeout)
+		info, err := castMediaStatusFunc(host, opts.timeout)
 		if err != nil {
 			return "", err
 		}
@@ -672,28 +671,33 @@ func dispatchVolume(args []string, opts options, cfg Config, client device) (str
 		}
 		return fmt.Sprintf("Volume set to %d", amount), nil
 	}
+	player, err := client.PlayerStatus()
+	if err != nil {
+		return "", err
+	}
+	current := intPtr(player["vol"])
+	if current == nil {
+		return "", runtimef("device did not report current volume")
+	}
+	target := *current
+	volumeDelta := amount
 	if mode == "up" {
-		player, err := client.PlayerStatus()
-		if err != nil {
-			return "", err
-		}
-		current := intPtr(player["vol"])
-		if current != nil && *current+amount > maxVolume {
+		target += amount
+		if target > maxVolume {
 			return "", usagef("relative volume would exceed configured maxVolume %d", maxVolume)
 		}
-		if err := client.VolumeUp(amount); err != nil {
-			return "", err
-		}
-		if opts.asJSON {
-			return FormatRaw(map[string]any{"volumeDelta": amount})
-		}
-		return fmt.Sprintf("Volume increased by %d", amount), nil
+	} else {
+		target = max(0, target-amount)
+		volumeDelta = -amount
 	}
-	if err := client.VolumeDown(amount); err != nil {
+	if err := client.SetVolume(target); err != nil {
 		return "", err
 	}
 	if opts.asJSON {
-		return FormatRaw(map[string]any{"volumeDelta": -amount})
+		return FormatRaw(map[string]any{"volumeDelta": volumeDelta})
+	}
+	if mode == "up" {
+		return fmt.Sprintf("Volume increased by %d", amount), nil
 	}
 	return fmt.Sprintf("Volume decreased by %d", amount), nil
 }

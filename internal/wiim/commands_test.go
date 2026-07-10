@@ -90,10 +90,9 @@ func TestPresetErrors(t *testing.T) {
 }
 
 func TestRelativeVolumeClampsToMaxVolume(t *testing.T) {
-	// The fakeDevice.PlayerStatus returns vol: "38" and default maxVolume is 55
-	// 38 + 20 = 58 > 55 -> should error
 	fd := &fakeDevice{}
 	cfg := Config{MaxVolume: 55}
+	startStatus := fd.playerStatusCalls
 	_, err := dispatchVolume([]string{"volume", "+20"}, options{}, cfg, fd)
 	if err == nil {
 		t.Fatal("expected error")
@@ -101,12 +100,18 @@ func TestRelativeVolumeClampsToMaxVolume(t *testing.T) {
 	if !strings.Contains(err.Error(), "maxVolume") {
 		t.Fatalf("error should mention maxVolume: %v", err)
 	}
-	if containsCall(fd.calls, "up") {
-		t.Fatalf("should not have called volumeUp: %#v", fd.calls)
+	if fd.playerStatusCalls != startStatus+1 {
+		t.Fatalf("PlayerStatus calls = %d, want 1", fd.playerStatusCalls-startStatus)
+	}
+	if len(fd.setVolumeValues) != 0 {
+		t.Fatalf("should not have called SetVolume: %#v", fd.setVolumeValues)
+	}
+	if containsCall(fd.calls, "up") || containsCall(fd.calls, "down") {
+		t.Fatalf("should not have called relative volume helpers: %#v", fd.calls)
 	}
 
-	// 38 + 17 = 55 < 55 -> should succeed
 	fd2 := &fakeDevice{}
+	startStatus = fd2.playerStatusCalls
 	out, err := dispatchVolume([]string{"volume", "+17"}, options{}, cfg, fd2)
 	if err != nil {
 		t.Fatal(err)
@@ -114,14 +119,21 @@ func TestRelativeVolumeClampsToMaxVolume(t *testing.T) {
 	if !strings.Contains(out, "Volume increased by 17") {
 		t.Fatalf("output: %s", out)
 	}
-	if !containsCall(fd2.calls, "up") {
-		t.Fatalf("should have called volumeUp: %#v", fd2.calls)
+	if fd2.playerStatusCalls != startStatus+1 {
+		t.Fatalf("PlayerStatus calls = %d, want 1", fd2.playerStatusCalls-startStatus)
+	}
+	if len(fd2.setVolumeValues) != 1 || fd2.setVolumeValues[0] != 55 {
+		t.Fatalf("SetVolume = %#v, want 55", fd2.setVolumeValues)
+	}
+	if containsCall(fd2.calls, "up") || containsCall(fd2.calls, "down") {
+		t.Fatalf("should not have called relative volume helpers: %#v", fd2.calls)
 	}
 }
 
-func TestRelativeVolumeDownDoesNotClamp(t *testing.T) {
+func TestRelativeVolumeDownUsesExactTarget(t *testing.T) {
 	fd := &fakeDevice{}
 	cfg := Config{MaxVolume: 55}
+	startStatus := fd.playerStatusCalls
 	out, err := dispatchVolume([]string{"volume", "-30"}, options{}, cfg, fd)
 	if err != nil {
 		t.Fatal(err)
@@ -129,8 +141,49 @@ func TestRelativeVolumeDownDoesNotClamp(t *testing.T) {
 	if !strings.Contains(out, "Volume decreased by 30") {
 		t.Fatalf("output: %s", out)
 	}
-	if !containsCall(fd.calls, "down") {
-		t.Fatalf("should have called volumeDown: %#v", fd.calls)
+	if fd.playerStatusCalls != startStatus+1 {
+		t.Fatalf("PlayerStatus calls = %d, want 1", fd.playerStatusCalls-startStatus)
+	}
+	if len(fd.setVolumeValues) != 1 || fd.setVolumeValues[0] != 8 {
+		t.Fatalf("SetVolume = %#v, want 8", fd.setVolumeValues)
+	}
+}
+
+func TestRelativeVolumeDownClampsToZero(t *testing.T) {
+	fd := &fakeDevice{}
+	cfg := Config{MaxVolume: 55}
+	startStatus := fd.playerStatusCalls
+	out, err := dispatchVolume([]string{"volume", "-50"}, options{}, cfg, fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Volume decreased by 50") {
+		t.Fatalf("output: %s", out)
+	}
+	if fd.playerStatusCalls != startStatus+1 {
+		t.Fatalf("PlayerStatus calls = %d, want 1", fd.playerStatusCalls-startStatus)
+	}
+	if len(fd.setVolumeValues) != 1 || fd.setVolumeValues[0] != 0 {
+		t.Fatalf("SetVolume = %#v, want 0", fd.setVolumeValues)
+	}
+}
+
+func TestRelativeVolumeMissingCurrentVolume(t *testing.T) {
+	fd := &fakeDevice{playerStatus: map[string]any{"status": "stop", "mute": "0", "mode": "49"}}
+	cfg := Config{MaxVolume: 55}
+	startStatus := fd.playerStatusCalls
+	_, err := dispatchVolume([]string{"volume", "+5"}, options{}, cfg, fd)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "current volume") {
+		t.Fatalf("error should mention missing volume: %v", err)
+	}
+	if fd.playerStatusCalls != startStatus+1 {
+		t.Fatalf("PlayerStatus calls = %d, want 1", fd.playerStatusCalls-startStatus)
+	}
+	if len(fd.setVolumeValues) != 0 {
+		t.Fatalf("should not have called SetVolume: %#v", fd.setVolumeValues)
 	}
 }
 
@@ -158,6 +211,9 @@ func TestVolumeGetJSON(t *testing.T) {
 	if !strings.Contains(out, `"volume": 38`) {
 		t.Fatalf("output should contain volume: %s", out)
 	}
+	if fd.playerStatusCalls != 1 || len(fd.setVolumeValues) != 0 {
+		t.Fatalf("calls status=%d set=%#v", fd.playerStatusCalls, fd.setVolumeValues)
+	}
 }
 
 func TestVolumeSetJSON(t *testing.T) {
@@ -169,8 +225,8 @@ func TestVolumeSetJSON(t *testing.T) {
 	if !strings.Contains(out, `"volume": 25`) {
 		t.Fatalf("output should contain volume: %s", out)
 	}
-	if !containsCall(fd.calls, "vol") {
-		t.Fatalf("should have called SetVolume: %#v", fd.calls)
+	if len(fd.setVolumeValues) != 1 || fd.setVolumeValues[0] != 25 || fd.playerStatusCalls != 0 {
+		t.Fatalf("calls status=%d set=%#v", fd.playerStatusCalls, fd.setVolumeValues)
 	}
 }
 
@@ -183,8 +239,8 @@ func TestVolumeRelativeJSON(t *testing.T) {
 	if !strings.Contains(out, `"volumeDelta": 10`) {
 		t.Fatalf("output should contain volumeDelta: %s", out)
 	}
-	if !containsCall(fd.calls, "up") {
-		t.Fatalf("should have called volumeUp: %#v", fd.calls)
+	if fd.playerStatusCalls != 1 || len(fd.setVolumeValues) != 1 || fd.setVolumeValues[0] != 48 {
+		t.Fatalf("calls status=%d set=%#v", fd.playerStatusCalls, fd.setVolumeValues)
 	}
 }
 
@@ -610,26 +666,33 @@ func TestPlaybackErrorPropagation(t *testing.T) {
 	}
 }
 
-func TestCastNowErrorPath(t *testing.T) {
-	// CastMediaStatus makes a real TLS connection, so it will fail
-	// for any host that isn't running a Cast endpoint.
-	_, err := dispatch([]string{"cast-now"}, options{}, "192.0.2.1", &fakeDevice{}, Config{}, &bytes.Buffer{}, &bytes.Buffer{})
-	if err == nil {
-		t.Fatal("expected error from unreachable cast endpoint")
+func TestCastNowDispatchUsesInjectedTimeout(t *testing.T) {
+	fake, done := withFakeCastMediaStatus(t)
+	defer done()
+
+	out, err := dispatch([]string{"cast-now"}, options{timeout: 9.5}, "192.0.2.1", &fakeDevice{}, Config{Timeout: 1}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The error should mention connection failure or timeout
-	if !strings.Contains(err.Error(), "connect") && !strings.Contains(err.Error(), "timeout") {
-		t.Logf("got expected error: %v", err)
+	if fake.calls != 1 || fake.host != "192.0.2.1" || fake.timeout != 9.5 {
+		t.Fatalf("capture = %+v", fake)
+	}
+	if !strings.Contains(out, "App: CastApp") {
+		t.Fatalf("output: %s", out)
 	}
 }
 
-func TestCastNowWithCustomTimeout(t *testing.T) {
-	fd := &fakeDevice{}
-	// Use a very short timeout to avoid waiting
-	cfg := Config{Timeout: 0.1}
-	_, err := dispatch([]string{"cast-now"}, options{timeout: 0.1}, "198.51.100.1", fd, cfg, &bytes.Buffer{}, &bytes.Buffer{})
-	if err == nil {
-		t.Fatal("expected error from unreachable cast endpoint")
+func TestCastNowDispatchErrorPropagation(t *testing.T) {
+	fake, done := withFakeCastMediaStatus(t)
+	defer done()
+	fake.err = runtimef("cast error")
+
+	_, err := dispatch([]string{"cast-now"}, options{timeout: 1.5}, "198.51.100.1", &fakeDevice{}, Config{Timeout: 7}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "cast error") {
+		t.Fatalf("err = %v", err)
+	}
+	if fake.calls != 1 || fake.host != "198.51.100.1" || fake.timeout != 1.5 {
+		t.Fatalf("capture = %+v", fake)
 	}
 }
 

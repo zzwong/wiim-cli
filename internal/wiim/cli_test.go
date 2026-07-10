@@ -3,6 +3,7 @@ package wiim
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -10,9 +11,14 @@ import (
 )
 
 type fakeDevice struct {
-	calls   []string
-	host    string
-	timeout float64
+	calls             []string
+	host              string
+	timeout           float64
+	playerStatus      map[string]any
+	playerStatusCalls int
+	setVolumeValues   []int
+	volume            int
+	volumeSet         bool
 }
 
 func (f *fakeDevice) CastInfo() (map[string]any, error) {
@@ -22,7 +28,15 @@ func (f *fakeDevice) StatusEx() (map[string]any, error) {
 	return map[string]any{"project": "WiiM_Ultra", "firmware": "fw", "internet": "1"}, nil
 }
 func (f *fakeDevice) PlayerStatus() (map[string]any, error) {
-	return map[string]any{"status": "stop", "vol": "38", "mute": "0", "mode": "49"}, nil
+	f.playerStatusCalls++
+	if f.playerStatus != nil {
+		return f.playerStatus, nil
+	}
+	if !f.volumeSet {
+		f.volume = 38
+		f.volumeSet = true
+	}
+	return map[string]any{"status": "stop", "vol": f.volume, "mute": "0", "mode": "49"}, nil
 }
 func (f *fakeDevice) MetaInfo() map[string]any {
 	return map[string]any{"metaData": map[string]any{"title": "Song"}}
@@ -31,7 +45,13 @@ func (f *fakeDevice) Command(c string) (any, error) {
 	f.calls = append(f.calls, "raw:"+c)
 	return map[string]any{"command": c}, nil
 }
-func (f *fakeDevice) SetVolume(_ int) error   { f.calls = append(f.calls, "vol"); return nil }
+func (f *fakeDevice) SetVolume(v int) error {
+	f.calls = append(f.calls, "vol")
+	f.setVolumeValues = append(f.setVolumeValues, v)
+	f.volume = v
+	f.volumeSet = true
+	return nil
+}
 func (f *fakeDevice) VolumeUp(_ int) error    { f.calls = append(f.calls, "up"); return nil }
 func (f *fakeDevice) VolumeDown(_ int) error  { f.calls = append(f.calls, "down"); return nil }
 func (f *fakeDevice) Mute(_ bool) error       { f.calls = append(f.calls, "mute"); return nil }
@@ -52,7 +72,7 @@ func (f *fakeDevice) SwitchInput(input string) error {
 
 func withFake(t *testing.T) (*fakeDevice, func()) {
 	t.Helper()
-	fd := &fakeDevice{}
+	fd := &fakeDevice{volume: 38}
 	old := newDevice
 	newDevice = func(host string, timeout float64) device {
 		fd.host = host
@@ -60,6 +80,27 @@ func withFake(t *testing.T) (*fakeDevice, func()) {
 		return fd
 	}
 	return fd, func() { newDevice = old }
+}
+
+type fakeCastMediaStatus struct {
+	calls   int
+	host    string
+	timeout float64
+	info    CastMediaInfo
+	err     error
+}
+
+func withFakeCastMediaStatus(t *testing.T) (*fakeCastMediaStatus, func()) {
+	t.Helper()
+	fc := &fakeCastMediaStatus{info: CastMediaInfo{App: "CastApp", Title: "Song"}}
+	old := castMediaStatusFunc
+	castMediaStatusFunc = func(host string, timeout float64) (CastMediaInfo, error) {
+		fc.calls++
+		fc.host = host
+		fc.timeout = timeout
+		return fc.info, fc.err
+	}
+	return fc, func() { castMediaStatusFunc = old }
 }
 
 func runTest(args ...string) (int, string, string) {
@@ -185,6 +226,72 @@ func TestDiscoverCommandRejectsZeroTimeout(t *testing.T) {
 	code, _, errText := runTest("--timeout", "0", "discover")
 	if code != 2 || !strings.Contains(errText, "timeout must be") {
 		t.Fatalf("code %d err %q", code, errText)
+	}
+}
+
+func TestCastNowUsesDefaultTimeout(t *testing.T) {
+	fake, done := withFakeCastMediaStatus(t)
+	defer done()
+
+	code, out, errText := runTest("--host", "cast.local", "cast-now")
+	if code != 0 {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	if fake.calls != 1 || fake.host != "cast.local" || fake.timeout != 3.0 {
+		t.Fatalf("capture = %+v", fake)
+	}
+	if !strings.Contains(out, "App: CastApp") || !strings.Contains(out, "Title: Song") {
+		t.Fatalf("output %q", out)
+	}
+}
+
+func TestCastNowUsesConfigTimeout(t *testing.T) {
+	fake, done := withFakeCastMediaStatus(t)
+	defer done()
+
+	cfgPath := t.TempDir() + "/config.json"
+	if err := os.WriteFile(cfgPath, []byte(`{"defaultHost":"cfg-host","timeout":7}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, errText := runTest("--config", cfgPath, "cast-now")
+	if code != 0 {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	if fake.calls != 1 || fake.host != "cfg-host" || fake.timeout != 7 {
+		t.Fatalf("capture = %+v", fake)
+	}
+}
+
+func TestCastNowExplicitTimeoutPrecedence(t *testing.T) {
+	fake, done := withFakeCastMediaStatus(t)
+	defer done()
+
+	cfgPath := t.TempDir() + "/config.json"
+	if err := os.WriteFile(cfgPath, []byte(`{"defaultHost":"cfg-host","timeout":7}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, errText := runTest("--config", cfgPath, "--timeout", "2.5", "cast-now")
+	if code != 0 {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	if fake.calls != 1 || fake.host != "cfg-host" || fake.timeout != 2.5 {
+		t.Fatalf("capture = %+v", fake)
+	}
+}
+
+func TestCastNowErrorPropagation(t *testing.T) {
+	fake, done := withFakeCastMediaStatus(t)
+	defer done()
+	fake.err = errors.New("cast boom")
+
+	code, _, errText := runTest("--host", "cast.local", "cast-now")
+	if code == 0 || !strings.Contains(errText, "cast boom") {
+		t.Fatalf("code %d err %q", code, errText)
+	}
+	if fake.calls != 1 || fake.host != "cast.local" || fake.timeout != 3.0 {
+		t.Fatalf("capture = %+v", fake)
 	}
 }
 
@@ -320,20 +427,22 @@ func TestNow(t *testing.T) {
 }
 
 func TestVolumeGetSetAndMaxVolume(t *testing.T) {
-	_, done := withFake(t)
+	fd, done := withFake(t)
 	defer done()
 	code, out, _ := runTest("--host", "1.2.3.4", "volume")
 	if code != 0 || strings.TrimSpace(out) != "38" {
 		t.Fatalf("code %d out %q", code, out)
 	}
 	code, out, _ = runTest("--host", "1.2.3.4", "volume", "30")
-	if code != 0 || !strings.Contains(out, "Volume set to 30") {
-		t.Fatalf("code %d out %q", code, out)
+	if code != 0 || !strings.Contains(out, "Volume set to 30") || len(fd.setVolumeValues) == 0 || fd.setVolumeValues[len(fd.setVolumeValues)-1] != 30 {
+		t.Fatalf("code %d out %q set=%v", code, out, fd.setVolumeValues)
 	}
 	code, _, errText := runTest("--host", "1.2.3.4", "volume", "60")
 	if code != 2 || !strings.Contains(errText, "maxVolume 55") {
 		t.Fatalf("code %d err %q", code, errText)
 	}
+	fd.volume = 38
+	fd.volumeSet = false
 	code, _, errText = runTest("--host", "1.2.3.4", "volume", "+20")
 	if code != 2 || !strings.Contains(errText, "maxVolume 55") {
 		t.Fatalf("code %d err %q", code, errText)
@@ -343,21 +452,45 @@ func TestVolumeGetSetAndMaxVolume(t *testing.T) {
 func TestVolumeAllowsSignedRelativeValues(t *testing.T) {
 	fd, done := withFake(t)
 	defer done()
+
+	startStatus := fd.playerStatusCalls
+	startSet := len(fd.setVolumeValues)
 	code, out, errText := runTest("--host", "1.2.3.4", "volume", "+5")
-	if code != 0 || !strings.Contains(out, "Volume increased by 5") || fd.calls[len(fd.calls)-1] != "up" {
-		t.Fatalf("code %d out %q err %q calls %#v", code, out, errText, fd.calls)
+	if code != 0 || !strings.Contains(out, "Volume increased by 5") {
+		t.Fatalf("code %d out %q err %q", code, out, errText)
 	}
+	if fd.playerStatusCalls != startStatus+1 || len(fd.setVolumeValues) != startSet+1 || fd.setVolumeValues[startSet] != 43 {
+		t.Fatalf("status=%d set=%v calls=%#v", fd.playerStatusCalls-startStatus, fd.setVolumeValues[startSet:], fd.calls)
+	}
+
+	startStatus = fd.playerStatusCalls
+	startSet = len(fd.setVolumeValues)
 	code, out, errText = runTest("--host", "1.2.3.4", "volume", "-5")
-	if code != 0 || !strings.Contains(out, "Volume decreased by 5") || fd.calls[len(fd.calls)-1] != "down" {
-		t.Fatalf("code %d out %q err %q calls %#v", code, out, errText, fd.calls)
+	if code != 0 || !strings.Contains(out, "Volume decreased by 5") {
+		t.Fatalf("code %d out %q err %q", code, out, errText)
 	}
+	if fd.playerStatusCalls != startStatus+1 || len(fd.setVolumeValues) != startSet+1 || fd.setVolumeValues[startSet] != 38 {
+		t.Fatalf("status=%d set=%v calls=%#v", fd.playerStatusCalls-startStatus, fd.setVolumeValues[startSet:], fd.calls)
+	}
+
+	startStatus = fd.playerStatusCalls
+	startSet = len(fd.setVolumeValues)
 	code, out, errText = runTest("volume", "-5", "--host", "1.2.3.4")
 	if code != 0 || !strings.Contains(out, "Volume decreased by 5") {
 		t.Fatalf("code %d out %q err %q", code, out, errText)
 	}
+	if fd.playerStatusCalls != startStatus+1 || len(fd.setVolumeValues) != startSet+1 || fd.setVolumeValues[startSet] != 33 {
+		t.Fatalf("status=%d set=%v calls=%#v", fd.playerStatusCalls-startStatus, fd.setVolumeValues[startSet:], fd.calls)
+	}
+
+	startStatus = fd.playerStatusCalls
+	startSet = len(fd.setVolumeValues)
 	code, out, errText = runTest("--host", "1.2.3.4", "volume", "--", "-5")
 	if code != 0 || !strings.Contains(out, "Volume decreased by 5") {
 		t.Fatalf("code %d out %q err %q", code, out, errText)
+	}
+	if fd.playerStatusCalls != startStatus+1 || len(fd.setVolumeValues) != startSet+1 || fd.setVolumeValues[startSet] != 28 {
+		t.Fatalf("status=%d set=%v calls=%#v", fd.playerStatusCalls-startStatus, fd.setVolumeValues[startSet:], fd.calls)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"time"
@@ -22,8 +23,8 @@ const (
 )
 
 var (
-	userHomeDir        = os.UserHomeDir
-	beforeAtomicRename = func(string) error { return nil }
+	userHomeDir = os.UserHomeDir
+	renameFile  = os.Rename
 )
 
 // DeviceProfile holds the connection settings for a named WiiM device.
@@ -282,15 +283,14 @@ func SaveConfig(path string, cfg Config) (string, error) {
 	return path, nil
 }
 
-// writeFileAtomic replaces path only after a complete, durable temporary file
-// has been written in the target directory.
+// writeFileAtomic writes data to a complete, durable temporary file before
+// renaming it into place. The containing directory is synced after the rename
+// on platforms that support directory syncing; the rename's atomicity is
+// platform-dependent.
 func writeFileAtomic(path string, data []byte) (err error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create config directory %s: %w", dir, err)
-	}
-	if err := os.Chmod(dir, 0700); err != nil {
-		return fmt.Errorf("set config directory permissions %s: %w", dir, err)
 	}
 
 	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
@@ -323,13 +323,28 @@ func writeFileAtomic(path string, data []byte) (err error) {
 		return fmt.Errorf("close temporary config %s: %w", tempPath, err)
 	}
 	temp = nil
-	if err = beforeAtomicRename(path); err != nil {
-		return fmt.Errorf("prepare config replacement %s: %w", path, err)
-	}
-	if err = os.Rename(tempPath, path); err != nil {
+	if err = renameFile(tempPath, path); err != nil {
 		return fmt.Errorf("replace config %s: %w", path, err)
 	}
+	if err = syncConfigDirectory(dir); err != nil {
+		return fmt.Errorf("sync config directory %s: %w", dir, err)
+	}
 	return nil
+}
+
+func syncConfigDirectory(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		return err
+	}
+	return dir.Close()
 }
 
 func writeAll(file *os.File, data []byte) error {

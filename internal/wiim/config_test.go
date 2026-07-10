@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -484,35 +485,37 @@ func TestSaveConfigAtomicallyReplacesExistingConfig(t *testing.T) {
 	if got.DefaultHost != want.DefaultHost || got.Timeout != want.Timeout || got.MaxVolume != want.MaxVolume || got.Devices["office"].Host != "office-host" {
 		t.Fatalf("LoadConfig() = %#v, want complete replacement", got)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatalf("config mode = %o, want 0600", info.Mode().Perm())
-	}
-	dirInfo, err := os.Stat(filepath.Dir(path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dirInfo.Mode().Perm() != 0700 {
-		t.Fatalf("config directory mode = %o, want 0700", dirInfo.Mode().Perm())
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("config mode = %o, want 0600", info.Mode().Perm())
+		}
+		dirInfo, err := os.Stat(filepath.Dir(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dirInfo.Mode().Perm() != 0755 {
+			t.Fatalf("config directory mode = %o, want existing 0755", dirInfo.Mode().Perm())
+		}
 	}
 	if temps := configTempFiles(t, path); len(temps) != 0 {
 		t.Fatalf("temporary config files remain: %q", temps)
 	}
 }
 
-func TestWriteFileAtomicPreRenameFailurePreservesTarget(t *testing.T) {
+func TestWriteFileAtomicRenameFailurePreservesTargetAndCleansUp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	original := []byte("{\"complete\":\"old config\"}\n")
 	if err := os.WriteFile(path, original, 0600); err != nil {
 		t.Fatal(err)
 	}
-	forcedErr := errors.New("forced pre-rename failure")
-	old := beforeAtomicRename
-	beforeAtomicRename = func(string) error { return forcedErr }
-	t.Cleanup(func() { beforeAtomicRename = old })
+	forcedErr := errors.New("forced rename failure")
+	old := renameFile
+	renameFile = func(string, string) error { return forcedErr }
+	t.Cleanup(func() { renameFile = old })
 
 	err := writeFileAtomic(path, []byte("{\"complete\":\"new config\"}\n"))
 	if !errors.Is(err, forcedErr) {
@@ -523,7 +526,7 @@ func TestWriteFileAtomicPreRenameFailurePreservesTarget(t *testing.T) {
 		t.Fatal(readErr)
 	}
 	if !bytes.Equal(got, original) {
-		t.Fatalf("config changed after pre-rename failure: got %q, want %q", got, original)
+		t.Fatalf("config changed after rename failure: got %q, want %q", got, original)
 	}
 	if temps := configTempFiles(t, path); len(temps) != 0 {
 		t.Fatalf("temporary config files remain: %q", temps)

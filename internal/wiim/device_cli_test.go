@@ -40,7 +40,9 @@ func TestDeviceCommandTreeAndEmptyListDoNotResolveHost(t *testing.T) {
 }
 
 func TestDeviceCRUDHumanJSONErrorsAndPreservation(t *testing.T) {
-	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "")
+	// Device mutations must persist even when an unrelated environment override
+	// is invalid; SaveConfig validates the persisted URI independently.
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "https://example.com/invalid")
 	path := t.TempDir() + "/config.json"
 	const initial = `{"defaultHost":"legacy-host","timeout":7,"spotifyRedirectURI":"http://127.0.0.1:19999/callback","maxVolume":77,"defaultDevice":"kitchen","devices":{"kitchen":{"host":"kitchen-host"}}}`
 	if err := os.WriteFile(path, []byte(initial), 0600); err != nil {

@@ -675,10 +675,10 @@ func (a *app) runConfigSet(_ *cobra.Command, args []string) error {
 			return err
 		}
 	case "spotifyRedirectURI":
-		cfg.SpotifyRedirectURI = value
-		if _, err := ResolveSpotifyRedirectURI(cfg); err != nil {
+		if err := validateSpotifyRedirectURI(value); err != nil {
 			return err
 		}
+		cfg.SpotifyRedirectURI = value
 	default:
 		return usagef("unknown config key %s", key)
 	}

@@ -117,8 +117,9 @@ func jsonNumberHasNonzeroMantissa(value string) bool {
 }
 
 var (
-	hostPattern       = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-	deviceNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	hostPattern            = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	deviceNamePattern      = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	spotifyRedirectPattern = regexp.MustCompile(`^http://127\.0\.0\.1:[0-9]+/[A-Za-z0-9._~/-]+$`)
 )
 
 // ValidateDeviceName validates a name used as a key in Config.Devices.
@@ -182,6 +183,15 @@ func ResolveHost(cliHost, cliDevice string, cfg Config) (string, error) {
 	return "", usagef("host is required; pass --host, set WIIM_HOST, use --device with one of the configured profiles, or configure defaultHost/defaultDevice")
 }
 
+// validateSpotifyRedirectURI validates one Spotify OAuth redirect URI without
+// consulting process state such as environment variables or configuration.
+func validateSpotifyRedirectURI(value string) error {
+	if !spotifyRedirectPattern.MatchString(value) {
+		return usagef("spotifyRedirectURI must be a loopback http URL like http://127.0.0.1:19872/login")
+	}
+	return nil
+}
+
 // ResolveSpotifyRedirectURI returns the Spotify OAuth redirect URI from (in
 // order of precedence) WIIM_SPOTIFY_REDIRECT_URI, the config file, or the
 // default http://127.0.0.1:19872/login. Validates it is a loopback HTTP URL.
@@ -193,8 +203,8 @@ func ResolveSpotifyRedirectURI(cfg Config) (string, error) {
 	if redirectURI == "" {
 		redirectURI = defaultSpotifyRedirectURI
 	}
-	if !regexp.MustCompile(`^http://127\.0\.0\.1:[0-9]+/[A-Za-z0-9._~/-]+$`).MatchString(redirectURI) {
-		return "", usagef("spotifyRedirectURI must be a loopback http URL like http://127.0.0.1:19872/login")
+	if err := validateSpotifyRedirectURI(redirectURI); err != nil {
+		return "", err
 	}
 	return redirectURI, nil
 }
@@ -239,6 +249,9 @@ func SaveConfig(path string, cfg Config) (string, error) {
 	if cfg.SpotifyRedirectURI == "" {
 		cfg.SpotifyRedirectURI = defaultSpotifyRedirectURI
 	}
+	if err := validateSpotifyRedirectURI(cfg.SpotifyRedirectURI); err != nil {
+		return "", err
+	}
 	if cfg.DefaultHost != "" {
 		if err := ValidateHost(cfg.DefaultHost); err != nil {
 			return "", err
@@ -265,9 +278,6 @@ func SaveConfig(path string, cfg Config) (string, error) {
 		if _, ok := cfg.Devices[cfg.DefaultDevice]; !ok {
 			return "", usagef("default device profile %q is not configured", cfg.DefaultDevice)
 		}
-	}
-	if _, err := ResolveSpotifyRedirectURI(cfg); err != nil {
-		return "", err
 	}
 	if _, err := ResolveMaxVolume(cfg); err != nil {
 		return "", err

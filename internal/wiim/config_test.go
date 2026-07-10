@@ -303,6 +303,115 @@ func TestSaveConfigTreatsZeroTimeoutAsDefault(t *testing.T) {
 	}
 }
 
+func TestValidateSpotifyRedirectURIIsIndependentOfEnvironment(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "https://example.com/not-loopback")
+	for _, tc := range []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{name: "valid", value: "http://127.0.0.1:19999/callback", valid: true},
+		{name: "wrong scheme", value: "https://127.0.0.1:19999/callback"},
+		{name: "wrong host", value: "http://localhost:19999/callback"},
+		{name: "missing path", value: "http://127.0.0.1:19999"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateSpotifyRedirectURI(tc.value)
+			if tc.valid && err != nil {
+				t.Fatalf("validateSpotifyRedirectURI(%q) error = %v", tc.value, err)
+			}
+			if !tc.valid && err == nil {
+				t.Fatalf("validateSpotifyRedirectURI(%q) succeeded", tc.value)
+			}
+		})
+	}
+}
+
+func TestResolveSpotifyRedirectURIPrecedenceAndValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		env       string
+		cfg       Config
+		want      string
+		wantError bool
+	}{
+		{name: "default", want: defaultSpotifyRedirectURI},
+		{name: "config", cfg: Config{SpotifyRedirectURI: "http://127.0.0.1:19999/config"}, want: "http://127.0.0.1:19999/config"},
+		{name: "environment overrides invalid config", env: "http://127.0.0.1:19999/env", cfg: Config{SpotifyRedirectURI: "https://example.com/invalid"}, want: "http://127.0.0.1:19999/env"},
+		{name: "invalid environment is rejected", env: "https://example.com/invalid", cfg: Config{SpotifyRedirectURI: "http://127.0.0.1:19999/config"}, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", tc.env)
+			got, err := ResolveSpotifyRedirectURI(tc.cfg)
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("ResolveSpotifyRedirectURI() succeeded")
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("ResolveSpotifyRedirectURI() = %q, %v; want %q, nil", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSaveConfigValidatesPersistedRedirectIndependentOfEnvironment(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "http://127.0.0.1:19999/env")
+	_, err := SaveConfig(t.TempDir()+"/config.json", Config{SpotifyRedirectURI: "https://example.com/invalid"})
+	if err == nil {
+		t.Fatal("SaveConfig() succeeded with invalid persisted redirect URI")
+	}
+	if _, ok := err.(UsageError); !ok {
+		t.Fatalf("SaveConfig() error type %T, want UsageError: %v", err, err)
+	}
+}
+
+func TestConfigSetValidatesRedirectIndependentOfEnvironment(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "http://127.0.0.1:19999/env")
+	path := t.TempDir() + "/config.json"
+	code, _, errText := runTest("--config", path, "config", "set", "spotifyRedirectURI", "https://example.com/invalid")
+	if code != 2 || !strings.Contains(errText, "spotifyRedirectURI must be a loopback http URL") {
+		t.Fatalf("config set: code %d err %q", code, errText)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("config set created config: %v", err)
+	}
+}
+
+func TestConfigSetRejectsInvalidPersistedRedirectDespiteValidEnvironment(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "http://127.0.0.1:19999/env")
+	path := t.TempDir() + "/config.json"
+	initial := []byte(`{"defaultHost":"old-host","spotifyRedirectURI":"https://example.com/invalid"}`)
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errText := runTest("--config", path, "config", "set", "defaultHost", "new-host")
+	if code != 2 || !strings.Contains(errText, "spotifyRedirectURI must be a loopback http URL") {
+		t.Fatalf("config set with invalid persisted redirect: code %d err %q", code, errText)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, initial) {
+		t.Fatalf("config set changed invalid config on error: got %q, want %q", got, initial)
+	}
+}
+
+func TestSaveConfigAcceptsValidPersistedRedirectDespiteInvalidEnvironment(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "https://example.com/invalid")
+	path := t.TempDir() + "/config.json"
+	want := "http://127.0.0.1:19999/config"
+	if _, err := SaveConfig(path, Config{SpotifyRedirectURI: want}); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	got, err := LoadConfig(path)
+	if err != nil || got.SpotifyRedirectURI != want {
+		t.Fatalf("LoadConfig() = %#v, %v; want redirect %q", got, err, want)
+	}
+}
+
 func TestResolveHostPrecedence(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

@@ -164,6 +164,10 @@ func newApp(stdout, stderr io.Writer) *app {
 				if valueRequired.GetSpecifiedName() == "device" {
 					return usagef("flag --device requires a value")
 				}
+			case "host":
+				if valueRequired.GetSpecifiedName() == "host" {
+					return usagef("flag --host requires a value")
+				}
 			}
 		}
 		return err
@@ -472,13 +476,19 @@ func (a *app) runVersion(_ *cobra.Command, _ []string) error {
 }
 
 // runDiscover doesn't go through runDevice: it doesn't target a single known
-// host at all, so --host/config-file host resolution don't apply. It does
-// still resolve --timeout the same way every other command does (flag →
+// host at all, so explicit --host/--device flags are rejected and host
+// resolution from config does not apply. It does still resolve --timeout the
+// same way every other command does (flag →
 // config file's timeout → 3.0 default, with an explicit 0 rejected as a
 // usage error by resolveTimeout) — repurposed here as "how long to wait for
 // SSDP responses" rather than a per-request HTTP timeout, but resolved
 // consistently rather than silently ignoring a configured default.
 func (a *app) runDiscover(_ *cobra.Command, _ []string) error {
+	for _, name := range []string{"host", "device"} {
+		if flag := a.root.PersistentFlags().Lookup(name); flag != nil && flag.Changed {
+			return usagef("flag --%s is not valid with discover", name)
+		}
+	}
 	cfg, err := a.loadConfig()
 	if err != nil {
 		return err

@@ -179,11 +179,12 @@ Global options (`--host`, `--device`, `--timeout`, `--config`, `--json`) work be
 commands. Prefer named device profiles/config for daily use; `--host` is mainly an override for
 scripts/testing.
 
-**discover** doesn't take `--host` — it multicasts an SSDP search and only lists devices
-that also answer the WiiM HTTP API, so unrelated UPnP gear (TVs, printers, routers) on the
-same LAN is filtered out. `--timeout` (default `3.0`s) controls how long it waits for
-replies. See [Compatibility in `docs/api.md`](docs/api.md#compatibility) for which devices
-this can find.
+**discover** and **device discover** reject explicit `--host` or `--device` flags — they
+multicast an SSDP search and only list devices that also answer the WiiM HTTP API, so
+unrelated UPnP gear (TVs, printers, routers) on the same LAN is filtered out. Ambient
+`WIIM_HOST` and configured host/device selection are ignored. `--timeout` (default `3.0`s)
+controls how long it waits for replies. See [Compatibility in `docs/api.md`](docs/api.md#compatibility)
+for which devices this can find.
 
 **Spotify** — store credentials once, then log in:
 

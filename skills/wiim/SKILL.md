@@ -7,10 +7,11 @@ description: Use this skill when operating this repository's WiiM CLI or control
 
 Known development device details should be configured in `~/.config/wiim-cli/config.json` with `wiim setup --host <wiim-host>` or named with `wiim device add <name> <host>` and selected with `--device <name>`. `--host` temporarily overrides either. Do not assume a hardcoded host.
 
-If no host is configured and none was given, run `wiim discover` (no `--host` needed) before
+If no host is configured and none was given, run `wiim discover` (no target flag needed) before
 asking the user for one — it finds Linkplay/WiiM devices on the LAN via SSDP in a few
-seconds. It's read-only and safe to run unprompted; an empty result just means nothing
-answered, not an error.
+seconds. `wiim discover` and `wiim device discover` reject explicit `--host` and `--device`
+flags; ambient `WIIM_HOST` and configured host/device selection are ignored. Discovery is
+read-only and safe to run unprompted; an empty result just means nothing answered, not an error.
 
 ## Safe first commands
 
@@ -124,7 +125,7 @@ wiim spotify logout
 - Connection refused on plain HTTP port 80 is expected for the WiiM API; use the CLI's HTTPS API path.
 - The Cast setup endpoint is on port `8008` and uses HTTP.
 - The WiiM HTTPS API may use a self-signed/invalid certificate; the CLI intentionally disables certificate verification for LAN device calls.
-- If no `--host` is supplied, check `WIIM_HOST` or `~/.config/wiim-cli/config.json`.
+- For targeted device commands without `--host`, check `WIIM_HOST` or `~/.config/wiim-cli/config.json`.
 - Spotify redirect URI defaults to `http://127.0.0.1:19872/login`; override with `spotifyRedirectURI` or `WIIM_SPOTIFY_REDIRECT_URI`.
 - On Fedora/Linux, keychain access uses Secret Service; `secret-tool lookup` can print secrets, so avoid it except for debugging.
 

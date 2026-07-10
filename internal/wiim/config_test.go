@@ -380,6 +380,37 @@ func TestResolveHostPrecedence(t *testing.T) {
 	}
 }
 
+func TestValidateDeviceNameRejectsPathTraversalNames(t *testing.T) {
+	for _, name := range []string{".", ".."} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateDeviceName(name); err == nil {
+				t.Fatal("ValidateDeviceName() succeeded, want UsageError")
+			} else if _, ok := err.(UsageError); !ok {
+				t.Fatalf("error type %T, want UsageError: %v", err, err)
+			}
+		})
+	}
+}
+
+func TestSaveConfigValidatesProfilesInNameOrder(t *testing.T) {
+	cfg := Config{Devices: map[string]DeviceProfile{
+		"z-profile": {Host: "https://z-invalid"},
+		"a-profile": {Host: "https://a-invalid"},
+	}}
+	_, err := SaveConfig(t.TempDir()+"/config.json", cfg)
+	if err == nil {
+		t.Fatal("SaveConfig() succeeded, want UsageError")
+	}
+	usageErr, ok := err.(UsageError)
+	if !ok {
+		t.Fatalf("error type %T, want UsageError: %v", err, err)
+	}
+	if !strings.Contains(usageErr.Msg, `device profile "a-profile"`) ||
+		!strings.Contains(usageErr.Msg, "host must be a hostname or IP address, not a URL") {
+		t.Fatalf("error message = %q, want sorted profile name and host validation meaning", usageErr.Msg)
+	}
+}
+
 func TestSaveConfigRejectsInvalidProfiles(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -417,6 +448,7 @@ func TestLoadConfigOldJSONRemainsCompatible(t *testing.T) {
 }
 
 func TestSaveLoadConfigProfileRoundTrip(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "")
 	want := Config{
 		DefaultHost:   "legacy-host",
 		DefaultDevice: "office",

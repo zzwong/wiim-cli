@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -116,7 +117,7 @@ var (
 
 // ValidateDeviceName validates a name used as a key in Config.Devices.
 func ValidateDeviceName(name string) error {
-	if !deviceNamePattern.MatchString(name) {
+	if name == "." || name == ".." || !deviceNamePattern.MatchString(name) {
 		return usagef("device name must contain only letters, numbers, '.', '_', or '-'")
 	}
 	return nil
@@ -237,11 +238,20 @@ func SaveConfig(path string, cfg Config) (string, error) {
 			return "", err
 		}
 	}
-	for name, profile := range cfg.Devices {
+	profileNames := make([]string, 0, len(cfg.Devices))
+	for name := range cfg.Devices {
+		profileNames = append(profileNames, name)
+	}
+	sort.Strings(profileNames)
+	for _, name := range profileNames {
+		profile := cfg.Devices[name]
 		if err := ValidateDeviceName(name); err != nil {
 			return "", err
 		}
 		if err := ValidateHost(profile.Host); err != nil {
+			if usageErr, ok := err.(UsageError); ok {
+				return "", usagef("device profile %q: %s", name, usageErr.Msg)
+			}
 			return "", err
 		}
 	}

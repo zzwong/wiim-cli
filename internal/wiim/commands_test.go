@@ -89,7 +89,7 @@ func TestPresetErrors(t *testing.T) {
 	}
 }
 
-func TestRelativeVolumeClampsToMaxVolume(t *testing.T) {
+func TestRelativeVolumeUpRejectsAboveMaxVolume(t *testing.T) {
 	fd := &fakeDevice{}
 	cfg := Config{MaxVolume: 55}
 	startStatus := fd.playerStatusCalls

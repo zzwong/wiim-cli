@@ -25,8 +25,6 @@ type device interface {
 	MetaInfo() map[string]any
 	Command(string) (any, error)
 	SetVolume(int) error
-	VolumeUp(int) error
-	VolumeDown(int) error
 	Mute(bool) error
 	Playback(string) error
 	PlayURL(string) error

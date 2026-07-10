@@ -246,6 +246,7 @@ func TestCastNowUsesDefaultTimeout(t *testing.T) {
 }
 
 func TestCastNowUsesConfigTimeout(t *testing.T) {
+	t.Setenv("WIIM_HOST", "")
 	fake, done := withFakeCastMediaStatus(t)
 	defer done()
 
@@ -264,6 +265,7 @@ func TestCastNowUsesConfigTimeout(t *testing.T) {
 }
 
 func TestCastNowExplicitTimeoutPrecedence(t *testing.T) {
+	t.Setenv("WIIM_HOST", "")
 	fake, done := withFakeCastMediaStatus(t)
 	defer done()
 

@@ -172,15 +172,40 @@ func newApp(stdout, stderr io.Writer) *app {
 		}
 		return err
 	})
-	root.PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
 		if flag := root.PersistentFlags().Lookup("device"); flag != nil && flag.Changed && a.opts.device == "" {
 			return usagef("flag --device requires a value")
+		}
+		if flag := root.PersistentFlags().Lookup("device"); flag != nil && flag.Changed {
+			if target := deviceFlagRejectionTarget(cmd); target != "" {
+				return usagef("flag --device is not valid with %s", target)
+			}
 		}
 		return nil
 	}
 	a.root = root
 	a.addCommands()
 	return a
+}
+
+// deviceFlagRejectionTarget identifies command families that never select a
+// WiiM profile. Discovery retains its dedicated error in runDiscover so the
+// root command and the device-group alias remain identical.
+func deviceFlagRejectionTarget(cmd *cobra.Command) string {
+	for current := cmd; current != nil; current = current.Parent() {
+		if current.Name() == "discover" {
+			return ""
+		}
+	}
+	for current := cmd; current != nil; current = current.Parent() {
+		switch current.Name() {
+		case "setup", "version":
+			return current.Name()
+		case "config", "device", "spotify":
+			return current.Name()
+		}
+	}
+	return ""
 }
 
 func (a *app) addCommands() {

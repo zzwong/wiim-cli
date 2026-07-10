@@ -294,6 +294,9 @@ func FormatDiscovered(devices []DiscoveredDevice, asJSON bool) (string, error) {
 
 // FormatDeviceProfiles formats saved device profiles as a sorted table or JSON array.
 func FormatDeviceProfiles(cfg Config, asJSON bool) (string, error) {
+	if err := ValidateDeviceProfiles(cfg); err != nil {
+		return "", err
+	}
 	profiles := ListDeviceProfiles(cfg)
 	if asJSON {
 		data, err := json.Marshal(profiles)

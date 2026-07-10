@@ -188,8 +188,11 @@ wiim version
 ```
 
 Global options (`--host`, `--device`, `--timeout`, `--config`, `--json`) work before or after
-commands. `--device <name>` targets a saved profile without changing the config; prefer named
-profiles/config for daily use, while `--host` is mainly an override for scripts/testing.
+commands where applicable. `--device <name>` targets a saved profile without changing the
+config and applies only to commands that target a WiiM (including `cliamp` handoff/status);
+it is rejected for setup, configuration, profile-management, Spotify, version, and discovery
+commands. Prefer named profiles/config for daily use, while `--host` is mainly an override for
+scripts/testing.
 
 **discover** and **device discover** reject explicit `--host` or `--device` flags — they
 multicast an SSDP search and only list devices that also answer the WiiM HTTP API, so

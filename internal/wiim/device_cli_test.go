@@ -274,6 +274,154 @@ func TestDeviceDiscoverAliasDoesNotMutateConfig(t *testing.T) {
 	}
 }
 
+func TestDeviceAndConfigMutationsPreserveFutureSettings(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	initial := `{"defaultHost":"legacy-host","timeout":4,"spotifyRedirectURI":"http://127.0.0.1:19999/callback","maxVolume":60,"defaultDevice":"kitchen","devices":{"kitchen":{"host":"kitchen-host"}},"futureSetting":{"nested":[1,2],"enabled":true}}`
+	if err := os.WriteFile(path, []byte(initial), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	assertFutureSetting := func() map[string]json.RawMessage {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatalf("config JSON: %v", err)
+		}
+		var future struct {
+			Enabled bool  `json:"enabled"`
+			Nested  []int `json:"nested"`
+		}
+		if err := json.Unmarshal(fields["futureSetting"], &future); err != nil || !future.Enabled || len(future.Nested) != 2 {
+			t.Fatalf("futureSetting = %s, error = %v", fields["futureSetting"], err)
+		}
+		return fields
+	}
+	for _, args := range [][]string{
+		{"device", "add", "office", "office-host"},
+		{"device", "use", "office"},
+		{"config", "set", "maxVolume", "70"},
+		{"config", "unset", "defaultDevice"},
+		{"device", "remove", "office"},
+	} {
+		code, _, errText := runTest(append([]string{"--config", path}, args...)...)
+		if code != 0 || errText != "" {
+			t.Fatalf("%q: code %d err %q", args, code, errText)
+		}
+		fields := assertFutureSetting()
+		if args[0] == "config" && args[2] == "defaultDevice" {
+			if _, ok := fields["defaultDevice"]; ok {
+				t.Fatalf("unset defaultDevice retained key: %s", fields["defaultDevice"])
+			}
+		}
+	}
+	code, _, errText := runTest("--config", path, "device", "remove", "kitchen")
+	if code != 0 || errText != "" {
+		t.Fatalf("remove final profile: code %d err %q", code, errText)
+	}
+	fields := assertFutureSetting()
+	if _, ok := fields["devices"]; ok {
+		t.Fatalf("empty devices key was retained: %s", fields["devices"])
+	}
+}
+
+func TestDeviceListRejectsInvalidManualProfilesWithoutControlOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile string
+	}{
+		{name: "invalid name", profile: `{"bad\u001bname":{"host":"valid-host"}}`},
+		{name: "invalid host", profile: `{"valid-name":{"host":"bad\u001bhost"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := t.TempDir() + "/config.json"
+			if err := os.WriteFile(path, []byte(`{"devices":`+tc.profile+`}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, asJSON := range []bool{false, true} {
+				args := []string{"--config", path, "device", "list"}
+				if asJSON {
+					args = append(args, "--json")
+				}
+				var stdout, stderr bytes.Buffer
+				err := Run(args, &stdout, &stderr)
+				if _, ok := err.(UsageError); !ok {
+					t.Fatalf("Run(%q) error = %T %v, want UsageError", args, err, err)
+				}
+				if stdout.Len() != 0 || bytes.Contains(stderr.Bytes(), []byte{'\x1b'}) {
+					t.Fatalf("Run(%q) emitted unsafe output: stdout %q stderr %q", args, stdout.String(), stderr.String())
+				}
+				if asJSON {
+					var envelope struct {
+						Error errorDetail `json:"error"`
+					}
+					if err := json.Unmarshal(stderr.Bytes(), &envelope); err != nil || envelope.Error.Kind != "usage" || envelope.Error.ExitCode != 2 {
+						t.Fatalf("Run(%q) JSON error = %q, parse error = %v", args, stderr.String(), err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestDeviceFlagRejectedForNonTargetCommandsBeforeSideEffects(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	initial := []byte(`{"futureSetting":{"preserve":true}}`)
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		target string
+	}{
+		{name: "setup", args: []string{"setup", "--host", "test-host"}, target: "setup"},
+		{name: "config", args: []string{"config", "set", "defaultHost", "test-host"}, target: "config"},
+		{name: "device list", args: []string{"device", "list"}, target: "device"},
+		{name: "device add", args: []string{"device", "add", "office", "test-host"}, target: "device"},
+		{name: "device remove", args: []string{"device", "remove", "office"}, target: "device"},
+		{name: "device use", args: []string{"device", "use", "office"}, target: "device"},
+		{name: "spotify", args: []string{"spotify", "credentials", "status"}, target: "spotify"},
+		{name: "version", args: []string{"version"}, target: "version"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, asJSON := range []bool{false, true} {
+				args := append([]string{"--config", path, "--device", "office"}, tc.args...)
+				if asJSON {
+					args = append(args, "--json")
+				}
+				var stdout, stderr bytes.Buffer
+				err := Run(args, &stdout, &stderr)
+				usageErr, ok := err.(UsageError)
+				wantMessage := "flag --device is not valid with " + tc.target
+				if !ok || usageErr.Msg != wantMessage {
+					t.Fatalf("Run(%q) error = %T %v, want UsageError %q", args, err, err, wantMessage)
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("Run(%q) stdout = %q, want empty", args, stdout.String())
+				}
+				if asJSON {
+					var envelope struct {
+						Error errorDetail `json:"error"`
+					}
+					if err := json.Unmarshal(stderr.Bytes(), &envelope); err != nil || envelope.Error.Kind != "usage" || envelope.Error.Message != wantMessage || envelope.Error.ExitCode != 2 {
+						t.Fatalf("Run(%q) JSON error = %q, parse error = %v", args, stderr.String(), err)
+					}
+				} else if stderr.String() != "wiim: "+wantMessage+"\n" {
+					t.Fatalf("Run(%q) stderr = %q", args, stderr.String())
+				}
+				got, readErr := os.ReadFile(path)
+				if readErr != nil || !bytes.Equal(got, initial) {
+					t.Fatalf("Run(%q) changed config: got %q read error %v", args, got, readErr)
+				}
+			}
+		})
+	}
+}
+
 func TestConfigSetAndUnsetDefaultDeviceAfterLegacySetup(t *testing.T) {
 	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "")
 	path := t.TempDir() + "/config.json"

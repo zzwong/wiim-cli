@@ -674,7 +674,107 @@ func TestSaveLoadConfigProfileRoundTrip(t *testing.T) {
 	}
 	for name, profile := range want.Devices {
 		if got.Devices[name] != profile {
-			t.Fatalf("profile %q = %#v, want %#v", name, got.Devices[name], profile)
+			t.Fatalf("profile %q = %#v, want %#v", name, got.Devices[name], want.Devices[name])
 		}
+	}
+}
+
+func TestSaveConfigPreservesUnknownTopLevelFields(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	initial := []byte(`{
+  "defaultHost": {"malformed": true},
+  "defaultDevice": "stale",
+  "devices": "stale",
+  "futureSetting": {"enabled": true, "nested": [1, 2]}
+}`)
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{DefaultHost: "current-host", Timeout: 4, MaxVolume: 60}
+	if _, err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("saved config is invalid JSON: %v", err)
+	}
+	if string(fields["defaultHost"]) != `"current-host"` {
+		t.Fatalf("defaultHost = %s, want current config value", fields["defaultHost"])
+	}
+	if _, ok := fields["defaultDevice"]; ok {
+		t.Fatalf("stale defaultDevice survived: %s", data)
+	}
+	if _, ok := fields["devices"]; ok {
+		t.Fatalf("stale devices survived: %s", data)
+	}
+	var future map[string]any
+	if err := json.Unmarshal(fields["futureSetting"], &future); err != nil {
+		t.Fatalf("futureSetting = %s: %v", fields["futureSetting"], err)
+	}
+	if enabled, ok := future["enabled"].(bool); !ok || !enabled {
+		t.Fatalf("futureSetting = %#v, want preserved object", future)
+	}
+}
+
+func TestLoadConfigAllowsInvalidUnusedProfiles(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	if err := os.WriteFile(path, []byte(`{"devices":{"bad\u001bname":{"host":"bad host"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v, want unused profiles to remain loadable", err)
+	}
+	if host, err := ResolveHost("explicit-host", "", cfg); err != nil || host != "explicit-host" {
+		t.Fatalf("ResolveHost() = %q, %v; want explicit-host, nil", host, err)
+	}
+}
+
+func TestSaveConfigNewFileKeepsCurrentEncoding(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	cfg := Config{
+		DefaultHost:        "current-host",
+		Timeout:            4,
+		SpotifyRedirectURI: "http://127.0.0.1:19999/callback",
+		MaxVolume:          60,
+	}
+	want, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, '\n')
+	if _, err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("new config encoding changed:\ngot:  %s\nwant: %s", got, want)
+	}
+}
+
+func TestConfigSetInvalidExistingJSONStillUsesLoadConfigError(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	initial := []byte(`{"defaultHost":`)
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errText := runTest("--config", path, "config", "set", "defaultHost", "new-host")
+	if code != 2 || !strings.Contains(errText, "invalid config JSON") {
+		t.Fatalf("config set: code %d err %q", code, errText)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, initial) {
+		t.Fatalf("invalid config changed:\ngot:  %s\nwant: %s", got, initial)
 	}
 }

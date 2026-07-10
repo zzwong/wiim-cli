@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
 	"strconv"
 	"time"
 )
@@ -117,6 +116,14 @@ func jsonNumberHasNonzeroMantissa(value string) bool {
 }
 
 var (
+	knownConfigKeys = map[string]struct{}{
+		"defaultHost":        {},
+		"defaultDevice":      {},
+		"devices":            {},
+		"timeout":            {},
+		"spotifyRedirectURI": {},
+		"maxVolume":          {},
+	}
 	hostPattern            = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	deviceNamePattern      = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	spotifyRedirectPattern = regexp.MustCompile(`^http://127\.0\.0\.1:[0-9]+/[A-Za-z0-9._~/-]+$`)
@@ -257,27 +264,8 @@ func SaveConfig(path string, cfg Config) (string, error) {
 			return "", err
 		}
 	}
-	profileNames := make([]string, 0, len(cfg.Devices))
-	for name := range cfg.Devices {
-		profileNames = append(profileNames, name)
-	}
-	sort.Strings(profileNames)
-	for _, name := range profileNames {
-		profile := cfg.Devices[name]
-		if err := ValidateDeviceName(name); err != nil {
-			return "", err
-		}
-		if err := ValidateHost(profile.Host); err != nil {
-			if usageErr, ok := err.(UsageError); ok {
-				return "", usagef("device profile %q: %s", name, usageErr.Msg)
-			}
-			return "", err
-		}
-	}
-	if cfg.DefaultDevice != "" {
-		if _, ok := cfg.Devices[cfg.DefaultDevice]; !ok {
-			return "", usagef("default device profile %q is not configured", cfg.DefaultDevice)
-		}
+	if err := ValidateDeviceProfiles(cfg); err != nil {
+		return "", err
 	}
 	if _, err := ResolveMaxVolume(cfg); err != nil {
 		return "", err
@@ -287,10 +275,54 @@ func SaveConfig(path string, cfg Config) (string, error) {
 		return "", err
 	}
 	data = append(data, '\n')
+	data, err = preserveUnknownConfigFields(path, data)
+	if err != nil {
+		return "", err
+	}
 	if err := writeFileAtomic(path, data); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+// preserveUnknownConfigFields keeps forward-compatible top-level settings from
+// an existing JSON object. Current Config fields always win, so known keys are
+// overwritten or omitted according to the config being saved.
+func preserveUnknownConfigFields(path string, data []byte) ([]byte, error) {
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		// SaveConfig historically overwrote unreadable, malformed, and absent
+		// targets when the atomic replacement itself was possible. Preserve that
+		// behavior when there is no readable object to merge.
+		return data, nil
+	}
+
+	var previous map[string]json.RawMessage
+	if err := json.Unmarshal(existing, &previous); err != nil || previous == nil {
+		return data, nil
+	}
+	var current map[string]json.RawMessage
+	if err := json.Unmarshal(data, &current); err != nil {
+		return nil, err
+	}
+
+	preserved := false
+	for key, value := range previous {
+		if _, known := knownConfigKeys[key]; known {
+			continue
+		}
+		current[key] = value
+		preserved = true
+	}
+	if !preserved {
+		return data, nil
+	}
+
+	merged, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(merged, '\n'), nil
 }
 
 // writeFileAtomic writes data to a complete, durable temporary file before

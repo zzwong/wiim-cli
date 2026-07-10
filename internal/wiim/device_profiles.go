@@ -2,6 +2,39 @@ package wiim
 
 import "sort"
 
+// ValidateDeviceProfiles validates all saved profiles in name order and makes
+// sure a configured default refers to a saved profile. It deliberately does
+// not run while loading config: a higher-precedence --host or WIIM_HOST may
+// legitimately bypass malformed, unused profiles.
+func ValidateDeviceProfiles(cfg Config) error {
+	names := make([]string, 0, len(cfg.Devices))
+	for name := range cfg.Devices {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := ValidateDeviceName(name); err != nil {
+			return err
+		}
+		if err := ValidateHost(cfg.Devices[name].Host); err != nil {
+			if usageErr, ok := err.(UsageError); ok {
+				return usagef("device profile %q: %s", name, usageErr.Msg)
+			}
+			return err
+		}
+	}
+	if cfg.DefaultDevice == "" {
+		return nil
+	}
+	if err := ValidateDeviceName(cfg.DefaultDevice); err != nil {
+		return err
+	}
+	if _, ok := cfg.Devices[cfg.DefaultDevice]; !ok {
+		return usagef("default device profile %q is not configured", cfg.DefaultDevice)
+	}
+	return nil
+}
+
 // DeviceProfileView is the presentation form of a saved device profile.
 type DeviceProfileView struct {
 	Name    string `json:"name"`

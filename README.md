@@ -69,24 +69,25 @@ wiim discover           # SSDP scan of the local network, ~3s
 wiim --json discover
 ```
 
-Host resolution order: `--host` flag → `WIIM_HOST` env var → `--device` profile →
-`defaultDevice` profile → `defaultHost` in `~/.config/wiim-cli/config.json` → error
-(host is required).
+Targeted host resolution precedence is exactly: `--host` > `WIIM_HOST` > explicit `--device` > `defaultDevice` > `defaultHost`. The first four entries select a host from the command line, environment, named profile, or configured default profile; `defaultHost` is the
+legacy direct-host fallback. If no source resolves, the command errors.
 
 ```bash
-wiim setup --host <wiim-host>              # writes defaultHost to config
+wiim setup --host <wiim-host>              # writes legacy defaultHost to config
 wiim config show
 wiim config set maxVolume 55
 wiim config set spotifyRedirectURI http://127.0.0.1:19872/login
 wiim config unset spotifyRedirectURI
 wiim config path
 
-# Name multiple WiiM devices and select one by default.
+# Name multiple WiiM devices and select one by default (all local config operations).
 wiim device add living-room wiim-living.local
 wiim device add office wiim-office.local
 wiim device use living-room
 wiim device list
 ```
+
+The complete config shape is:
 
 ```json
 {
@@ -96,26 +97,38 @@ wiim device list
   "maxVolume": 55,
   "defaultDevice": "living-room",
   "devices": {
-    "living-room": {"host": "wiim-living.local"}
+    "living-room": {"host": "wiim-living.local"},
+    "office": {"host": "wiim-office.local"}
   }
 }
 ```
 
-`maxVolume` (default `55`) caps absolute volume sets and relative volume increases.
+`defaultDevice` names an entry in `devices`; each profile currently contains a `host`. The
+`device list`, `device add`, `device use`, and `device remove` commands mutate only this local
+JSON file and never device state. Existing `defaultHost` configurations remain valid, and the
+CLI does not automatically migrate them to a profile; use `device add`/`device use` explicitly
+when adopting named profiles. `maxVolume` (default `55`) caps absolute volume sets and relative
+volume increases.
 
 ## Commands
 
 ```bash
-# Discovery
+# Discovery (read-only; no target is selected)
 wiim discover
-wiim device discover                  # same hostless discovery path
+wiim device discover                  # alias for the same hostless discovery path
 wiim --json discover
 
-# Named device profiles
+# Named device profiles (local config only)
 wiim device list
 wiim device add <name> <host>
 wiim device remove <name>
 wiim device use <name>
+
+# Noninteractive discovery-to-config workflow
+wiim device discover
+wiim device add living-room <discovered-host>
+wiim device use living-room
+wiim --device living-room status
 
 # Status
 wiim status
@@ -176,15 +189,16 @@ wiim completion bash        # also: fish, zsh, powershell
 ```
 
 Global options (`--host`, `--device`, `--timeout`, `--config`, `--json`) work before or after
-commands. Prefer named device profiles/config for daily use; `--host` is mainly an override for
-scripts/testing.
+commands. `--device <name>` targets a saved profile without changing the config; prefer named
+profiles/config for daily use, while `--host` is mainly an override for scripts/testing.
 
 **discover** and **device discover** reject explicit `--host` or `--device` flags — they
 multicast an SSDP search and only list devices that also answer the WiiM HTTP API, so
 unrelated UPnP gear (TVs, printers, routers) on the same LAN is filtered out. Ambient
-`WIIM_HOST` and configured host/device selection are ignored. `--timeout` (default `3.0`s)
-controls how long it waits for replies. See [Compatibility in `docs/api.md`](docs/api.md#compatibility)
-for which devices this can find.
+`WIIM_HOST`, `defaultDevice`, and `defaultHost` are ignored by discovery. Discovery is read-only:
+it validates candidates with status requests but does not write config or change device state.
+`--timeout` (default `3.0`s) controls how long it waits for replies. See
+[Compatibility in `docs/api.md`](docs/api.md#compatibility) for which devices this can find.
 
 **Spotify** — store credentials once, then log in:
 

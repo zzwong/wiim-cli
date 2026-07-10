@@ -5,7 +5,7 @@ description: Use this skill when operating this repository's WiiM CLI or control
 
 # WiiM CLI Operator Guidance
 
-Known development device details should be configured in `~/.config/wiim-cli/config.json` with `wiim setup --host <wiim-host>` or temporarily overridden with `--host`. Do not assume a hardcoded host.
+Known development device details should be configured in `~/.config/wiim-cli/config.json` with `wiim setup --host <wiim-host>` or named with `wiim device add <name> <host>` and selected with `--device <name>`. `--host` temporarily overrides either. Do not assume a hardcoded host.
 
 If no host is configured and none was given, run `wiim discover` (no `--host` needed) before
 asking the user for one — it finds Linkplay/WiiM devices on the LAN via SSDP in a few
@@ -24,6 +24,8 @@ wiim --host <wiim-host> cast-now
 wiim --host <wiim-host> input
 wiim --host <wiim-host> volume
 wiim --host <wiim-host> preset list
+wiim device list
+wiim device discover
 ```
 
 Use JSON for automation:
@@ -107,6 +109,9 @@ wiim config show
 wiim config path
 wiim config set <key> <value>
 wiim config unset <key>
+wiim device add <name> <host>
+wiim device remove <name>
+wiim device use <name>
 wiim spotify credentials set
 wiim spotify credentials set-secret
 wiim spotify credentials import-clipboard <id|secret>

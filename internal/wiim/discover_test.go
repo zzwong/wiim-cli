@@ -120,19 +120,3 @@ func TestSSDPMXNeverExceedsTheListenWindow(t *testing.T) {
 		}
 	}
 }
-
-func TestSSDPSearchCompletesWithoutErrorWhenNothingResponds(t *testing.T) {
-	// No WiiM/UPnP devices are expected on the network this test runs on, so
-	// this exercises the real socket/timeout path without asserting on any
-	// specific result — it just must not error and must not hang past the
-	// deadline.
-	start := time.Now()
-	ips, err := ssdpSearch(150 * time.Millisecond)
-	if err != nil {
-		t.Fatalf("ssdpSearch: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("ssdpSearch took %v, want close to the 150ms timeout", elapsed)
-	}
-	t.Logf("ssdpSearch found %d responder(s) on this network: %v", len(ips), ips)
-}

@@ -69,8 +69,9 @@ wiim discover           # SSDP scan of the local network, ~3s
 wiim --json discover
 ```
 
-Host resolution order: `--host` flag → `WIIM_HOST` env var → `defaultHost` in
-`~/.config/wiim-cli/config.json` → error (host is required).
+Host resolution order: `--host` flag → `WIIM_HOST` env var → `--device` profile →
+`defaultDevice` profile → `defaultHost` in `~/.config/wiim-cli/config.json` → error
+(host is required).
 
 ```bash
 wiim setup --host <wiim-host>              # writes defaultHost to config
@@ -79,6 +80,12 @@ wiim config set maxVolume 55
 wiim config set spotifyRedirectURI http://127.0.0.1:19872/login
 wiim config unset spotifyRedirectURI
 wiim config path
+
+# Name multiple WiiM devices and select one by default.
+wiim device add living-room wiim-living.local
+wiim device add office wiim-office.local
+wiim device use living-room
+wiim device list
 ```
 
 ```json
@@ -86,7 +93,11 @@ wiim config path
   "defaultHost": "wiim-ultra.local",
   "timeout": 3.0,
   "spotifyRedirectURI": "http://127.0.0.1:19872/login",
-  "maxVolume": 55
+  "maxVolume": 55,
+  "defaultDevice": "living-room",
+  "devices": {
+    "living-room": {"host": "wiim-living.local"}
+  }
 }
 ```
 
@@ -97,7 +108,14 @@ wiim config path
 ```bash
 # Discovery
 wiim discover
+wiim device discover                  # same hostless discovery path
 wiim --json discover
+
+# Named device profiles
+wiim device list
+wiim device add <name> <host>
+wiim device remove <name>
+wiim device use <name>
 
 # Status
 wiim status
@@ -157,8 +175,9 @@ wiim version
 wiim completion bash        # also: fish, zsh, powershell
 ```
 
-Global options (`--host`, `--timeout`, `--config`, `--json`) work before or after the
-command. Prefer config for daily use; `--host` is mainly an override for scripts/testing.
+Global options (`--host`, `--device`, `--timeout`, `--config`, `--json`) work before or after
+commands. Prefer named device profiles/config for daily use; `--host` is mainly an override for
+scripts/testing.
 
 **discover** doesn't take `--host` — it multicasts an SSDP search and only lists devices
 that also answer the WiiM HTTP API, so unrelated UPnP gear (TVs, printers, routers) on the

@@ -206,28 +206,26 @@ func TestSpotifyCredentialsSetStatusClear(t *testing.T) {
 }
 
 func TestSpotifyCallbackHandlerRejectsStateMismatch(t *testing.T) {
-	codeCh := make(chan string, 1)
-	errCh := make(chan error, 1)
+	resultCh := make(chan spotifyLoginResult, 1)
+	delivery := &spotifyLoginDelivery{ch: resultCh}
 	req := httptest.NewRequest("GET", "/login?state=wrong&code=abc", nil)
 	rr := httptest.NewRecorder()
 
-	spotifyCallbackHandler("expected", codeCh, errCh).ServeHTTP(rr, req)
+	spotifyCallbackHandler("expected", delivery).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status %d", rr.Code)
 	}
 	select {
-	case err := <-errCh:
-		if err == nil || !strings.Contains(err.Error(), "state mismatch") {
-			t.Fatalf("err %v", err)
+	case result := <-resultCh:
+		if result.err == nil || !strings.Contains(result.err.Error(), "state mismatch") {
+			t.Fatalf("result %#v", result)
+		}
+		if result.code != "" {
+			t.Fatalf("unexpected code %q", result.code)
 		}
 	default:
 		t.Fatal("expected error")
-	}
-	select {
-	case code := <-codeCh:
-		t.Fatalf("unexpected code %q", code)
-	default:
 	}
 }
 
@@ -418,36 +416,97 @@ func TestSpotifyCallbackHandlerOtherOutcomes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			codeCh := make(chan string, 1)
-			errCh := make(chan error, 1)
+			resultCh := make(chan spotifyLoginResult, 1)
+			delivery := &spotifyLoginDelivery{ch: resultCh}
 			rr := httptest.NewRecorder()
-			spotifyCallbackHandler("expected", codeCh, errCh).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.target, nil))
+			spotifyCallbackHandler("expected", delivery).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.target, nil))
+			result := <-resultCh
 			if tc.wantErr != "" {
 				if rr.Code != http.StatusBadRequest {
 					t.Fatalf("status %d", rr.Code)
 				}
-				select {
-				case err := <-errCh:
-					if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-						t.Fatalf("err %v", err)
-					}
-				default:
-					t.Fatal("expected error")
+				if result.err == nil || !strings.Contains(result.err.Error(), tc.wantErr) {
+					t.Fatalf("result %#v", result)
 				}
 				return
 			}
 			if rr.Code != http.StatusOK {
 				t.Fatalf("status %d", rr.Code)
 			}
-			select {
-			case code := <-codeCh:
-				if code != tc.code {
-					t.Fatalf("code %q", code)
-				}
-			default:
-				t.Fatal("expected code")
+			if result.code != tc.code || result.err != nil {
+				t.Fatalf("result %#v", result)
 			}
 		})
+	}
+}
+
+func TestSpotifyCallbackHandlerSuccessRejectsDuplicate(t *testing.T) {
+	resultCh := make(chan spotifyLoginResult, 1)
+	delivery := &spotifyLoginDelivery{ch: resultCh}
+	handler := spotifyCallbackHandler("expected", delivery)
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/login?state=expected&code=first", nil))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status %d", first.Code)
+	}
+
+	secondDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/login?state=expected&code=late", nil))
+		secondDone <- rr
+	}()
+	select {
+	case second := <-secondDone:
+		if second.Code != http.StatusConflict || !strings.Contains(second.Body.String(), "login callback already received") {
+			t.Fatalf("duplicate response: status %d body %q", second.Code, second.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("duplicate callback did not complete promptly")
+	}
+
+	result := <-resultCh
+	if result.code != "first" || result.err != nil {
+		t.Fatalf("result %#v", result)
+	}
+}
+
+func TestSpotifyCallbackHandlerErrorRejectsLateSuccess(t *testing.T) {
+	resultCh := make(chan spotifyLoginResult, 1)
+	delivery := &spotifyLoginDelivery{ch: resultCh}
+	handler := spotifyCallbackHandler("expected", delivery)
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/login?state=expected&error=access_denied", nil))
+	if first.Code != http.StatusBadRequest {
+		t.Fatalf("first status %d", first.Code)
+	}
+
+	late := httptest.NewRecorder()
+	handler.ServeHTTP(late, httptest.NewRequest(http.MethodGet, "/login?state=expected&code=late", nil))
+	if late.Code != http.StatusConflict || !strings.Contains(late.Body.String(), "login callback already received") {
+		t.Fatalf("late response: status %d body %q", late.Code, late.Body.String())
+	}
+
+	result := <-resultCh
+	if result.code != "" || result.err == nil || !strings.Contains(result.err.Error(), "authorization failed") {
+		t.Fatalf("result %#v", result)
+	}
+}
+
+func TestSpotifyLoginDeliveryIgnoresLateServerError(t *testing.T) {
+	resultCh := make(chan spotifyLoginResult, 1)
+	delivery := &spotifyLoginDelivery{ch: resultCh}
+	if !delivery.deliver(spotifyLoginResult{code: "callback"}) {
+		t.Fatal("first delivery rejected")
+	}
+	if delivery.deliver(spotifyLoginResult{err: io.ErrUnexpectedEOF}) {
+		t.Fatal("late server error delivered")
+	}
+	result := <-resultCh
+	if result.code != "callback" || result.err != nil {
+		t.Fatalf("result %#v", result)
 	}
 }
 
@@ -520,6 +579,34 @@ func TestRefreshSpotifyTokenKeepsRefreshTokenWhenOmitted(t *testing.T) {
 	}
 	if token.RefreshToken != "old-refresh" || token.AccessToken != "new-access" {
 		t.Fatalf("token %#v", token)
+	}
+}
+
+func TestSpotifyLoginBindFailureBeforeBrowser(t *testing.T) {
+	setupSpotifyTest(t)
+	if err := SpotifyCredentialsSetID("client-id"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SpotifyCredentialsSetSecret("client-secret"); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	opened := false
+	openSpotifyBrowser = func(string) error {
+		opened = true
+		return nil
+	}
+	err = SpotifyLogin(io.Discard, "http://"+listener.Addr().String()+"/login")
+	if err == nil || !strings.Contains(err.Error(), "address already in use") {
+		t.Fatalf("err %v", err)
+	}
+	if opened {
+		t.Fatal("browser opened after bind failure")
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -19,7 +21,10 @@ const (
 	timeoutRangeErrorMessage  = "timeout must be a positive number within the supported duration range"
 )
 
-var userHomeDir = os.UserHomeDir
+var (
+	userHomeDir        = os.UserHomeDir
+	beforeAtomicRename = func(string) error { return nil }
+)
 
 // DeviceProfile holds the connection settings for a named WiiM device.
 type DeviceProfile struct {
@@ -266,18 +271,79 @@ func SaveConfig(path string, cfg Config) (string, error) {
 	if _, err := ResolveMaxVolume(cfg); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return "", err
-	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return "", err
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := writeFileAtomic(path, data); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+// writeFileAtomic replaces path only after a complete, durable temporary file
+// has been written in the target directory.
+func writeFileAtomic(path string, data []byte) (err error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create config directory %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return fmt.Errorf("set config directory permissions %s: %w", dir, err)
+	}
+
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temporary config file in %s: %w", dir, err)
+	}
+	tempPath := temp.Name()
+	defer func() {
+		if temp != nil {
+			_ = temp.Close()
+		}
+		if err == nil {
+			return
+		}
+		if removeErr := os.Remove(tempPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err = fmt.Errorf("%w; remove temporary config %s: %v", err, tempPath, removeErr)
+		}
+	}()
+
+	if err = temp.Chmod(0600); err != nil {
+		return fmt.Errorf("set temporary config permissions %s: %w", tempPath, err)
+	}
+	if err = writeAll(temp, data); err != nil {
+		return fmt.Errorf("write temporary config %s: %w", tempPath, err)
+	}
+	if err = temp.Sync(); err != nil {
+		return fmt.Errorf("sync temporary config %s: %w", tempPath, err)
+	}
+	if err = temp.Close(); err != nil {
+		return fmt.Errorf("close temporary config %s: %w", tempPath, err)
+	}
+	temp = nil
+	if err = beforeAtomicRename(path); err != nil {
+		return fmt.Errorf("prepare config replacement %s: %w", path, err)
+	}
+	if err = os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("replace config %s: %w", path, err)
+	}
+	return nil
+}
+
+func writeAll(file *os.File, data []byte) error {
+	for len(data) > 0 {
+		n, err := file.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
 }
 
 const defaultTimeout = 3.0

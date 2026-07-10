@@ -192,6 +192,53 @@ func TestDeviceSelectionAndVolumeDeviceFlags(t *testing.T) {
 	}
 }
 
+func TestVolumeDeviceEmptySeparateValueFailsWithoutSideEffects(t *testing.T) {
+	old := newDevice
+	created := 0
+	newDevice = func(_ string, _ float64) device {
+		created++
+		return &fakeDevice{}
+	}
+	t.Cleanup(func() { newDevice = old })
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		json bool
+	}{
+		{name: "plain", args: []string{"--host", "test-host", "volume", "--device", ""}},
+		{name: "json", args: []string{"--host", "test-host", "volume", "--device", "", "--json"}, json: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := Run(tc.args, &stdout, &stderr)
+			usageErr, ok := err.(UsageError)
+			if !ok || usageErr.Msg != "flag --device requires a value" {
+				t.Fatalf("Run(%q) error = %T %v, want UsageError", tc.args, err, err)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("Run(%q) stdout = %q, want empty", tc.args, stdout.String())
+			}
+			if tc.json {
+				var envelope struct {
+					Error errorDetail `json:"error"`
+				}
+				if err := json.Unmarshal(stderr.Bytes(), &envelope); err != nil {
+					t.Fatalf("Run(%q) JSON error = %v: %q", tc.args, err, stderr.String())
+				}
+				if envelope.Error.Kind != "usage" || envelope.Error.Message != usageErr.Msg || envelope.Error.ExitCode != 2 {
+					t.Fatalf("Run(%q) JSON error = %#v", tc.args, envelope.Error)
+				}
+			} else if stderr.String() != "wiim: flag --device requires a value\n" {
+				t.Fatalf("Run(%q) stderr = %q", tc.args, stderr.String())
+			}
+			if created != 0 {
+				t.Fatalf("Run(%q) created %d device clients", tc.args, created)
+			}
+		})
+	}
+}
+
 func TestDeviceDiscoverAliasDoesNotMutateConfig(t *testing.T) {
 	t.Setenv("WIIM_HOST", "")
 	done := withFakeDiscovery(t, []string{"10.0.0.1"}, map[string]*fakeDiscoveryDevice{

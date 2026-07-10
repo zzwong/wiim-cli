@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -445,6 +446,97 @@ func TestLoadConfigOldJSONRemainsCompatible(t *testing.T) {
 	if cfg.DefaultHost != "old-host" || cfg.Timeout != 2 || cfg.MaxVolume != 60 || cfg.DefaultDevice != "" || cfg.Devices != nil {
 		t.Fatalf("LoadConfig() = %#v, want old fields and no profile fields", cfg)
 	}
+}
+
+func TestSaveConfigAtomicallyReplacesExistingConfig(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "")
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"incomplete":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	want := Config{
+		DefaultHost: "new-host",
+		Timeout:     8,
+		MaxVolume:   60,
+		Devices: map[string]DeviceProfile{
+			"office": {Host: "office-host"},
+		},
+	}
+	if _, err := SaveConfig(path, want); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(data) || bytes.Contains(data, []byte(`"incomplete"`)) {
+		t.Fatalf("config data = %q, want complete valid JSON", data)
+	}
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if got.DefaultHost != want.DefaultHost || got.Timeout != want.Timeout || got.MaxVolume != want.MaxVolume || got.Devices["office"].Host != "office-host" {
+		t.Fatalf("LoadConfig() = %#v, want complete replacement", got)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("config mode = %o, want 0600", info.Mode().Perm())
+	}
+	dirInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirInfo.Mode().Perm() != 0700 {
+		t.Fatalf("config directory mode = %o, want 0700", dirInfo.Mode().Perm())
+	}
+	if temps := configTempFiles(t, path); len(temps) != 0 {
+		t.Fatalf("temporary config files remain: %q", temps)
+	}
+}
+
+func TestWriteFileAtomicPreRenameFailurePreservesTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	original := []byte("{\"complete\":\"old config\"}\n")
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	forcedErr := errors.New("forced pre-rename failure")
+	old := beforeAtomicRename
+	beforeAtomicRename = func(string) error { return forcedErr }
+	t.Cleanup(func() { beforeAtomicRename = old })
+
+	err := writeFileAtomic(path, []byte("{\"complete\":\"new config\"}\n"))
+	if !errors.Is(err, forcedErr) {
+		t.Fatalf("writeFileAtomic() error = %v, want %v", err, forcedErr)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("config changed after pre-rename failure: got %q, want %q", got, original)
+	}
+	if temps := configTempFiles(t, path); len(temps) != 0 {
+		t.Fatalf("temporary config files remain: %q", temps)
+	}
+}
+
+func configTempFiles(t *testing.T, path string) []string {
+	t.Helper()
+	temps, err := filepath.Glob(filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*"))
+	if err != nil {
+		t.Fatalf("find temporary config files: %v", err)
+	}
+	return temps
 }
 
 func TestSaveLoadConfigProfileRoundTrip(t *testing.T) {

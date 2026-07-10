@@ -243,7 +243,7 @@ func (a *app) runVolumeCommand(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		if parseFlags && arg == "--device" {
-			if i+1 >= len(args) || args[i+1] == "--" {
+			if i+1 >= len(args) || args[i+1] == "" || args[i+1] == "--" {
 				return usagef("flag --device requires a value")
 			}
 			i++

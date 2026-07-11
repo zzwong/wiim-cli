@@ -3,6 +3,7 @@ package wiim
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -129,6 +130,93 @@ func FormatStatus(status Status, asJSON bool) (string, error) {
 		lines = append(lines, "State: "+status.PlaybackState)
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+func quoteHuman(value string) string {
+	quoted := strconv.QuoteToGraphic(value)
+	return quoted[1 : len(quoted)-1]
+}
+
+// FormatGroupStatus formats a GroupStatus as compact labeled fields or JSON.
+func FormatGroupStatus(status GroupStatus, asJSON bool) (string, error) {
+	if asJSON {
+		return jsonText(status)
+	}
+	var lines []string
+	if status.Name != "" {
+		lines = append(lines, "Name: "+quoteHuman(status.Name))
+	}
+	lines = append(lines, "Host: "+quoteHuman(status.Host))
+	if status.Model != "" {
+		lines = append(lines, "Model: "+quoteHuman(status.Model))
+	}
+	if status.Firmware != "" {
+		lines = append(lines, "Firmware: "+quoteHuman(status.Firmware))
+	}
+	lines = append(lines,
+		"Role: "+quoteHuman(status.Role),
+		"Grouped: "+yesNo(status.Grouped),
+	)
+	if status.GroupName != "" {
+		lines = append(lines, "Group name: "+quoteHuman(status.GroupName))
+	}
+	lines = append(lines, fmt.Sprintf("Member count: %d", status.MemberCount))
+	if status.WMRMVersion != "" {
+		lines = append(lines, "WMRM version: "+quoteHuman(status.WMRMVersion))
+	}
+	if status.MasterUUID != "" {
+		lines = append(lines, "Master UUID: "+quoteHuman(status.MasterUUID))
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// FormatGroupMembers formats group members in the API's order as labeled
+// blocks, or serializes the stable GroupMembers schema as JSON.
+func FormatGroupMembers(group GroupMembers, asJSON bool) (string, error) {
+	if asJSON {
+		if group.Members == nil {
+			group.Members = []GroupMember{}
+		}
+		return jsonText(group)
+	}
+	if len(group.Members) == 0 {
+		return "No group members.", nil
+	}
+	blocks := make([]string, 0, len(group.Members))
+	for index, member := range group.Members {
+		lines := []string{fmt.Sprintf("Member %d:", index+1)}
+		for _, field := range [][2]string{
+			{"Name", member.Name},
+			{"UUID", member.UUID},
+			{"IP", member.IP},
+			{"Version", member.Version},
+			{"Type", member.Type},
+		} {
+			if field[1] != "" {
+				lines = append(lines, field[0]+": "+quoteHuman(field[1]))
+			}
+		}
+		if member.Channel != nil {
+			lines = append(lines, fmt.Sprintf("Channel: %d", *member.Channel))
+		}
+		if member.Volume != nil {
+			lines = append(lines, fmt.Sprintf("Volume: %d", *member.Volume))
+		}
+		if member.Muted != nil {
+			lines = append(lines, "Muted: "+yesNo(*member.Muted))
+		}
+		if member.BatteryPercent != nil {
+			lines = append(lines, fmt.Sprintf("Battery percent: %d", *member.BatteryPercent))
+		}
+		if member.BatteryCharging != nil {
+			lines = append(lines, "Battery charging: "+yesNo(*member.BatteryCharging))
+		}
+		if member.Masked != nil {
+			lines = append(lines, "Masked: "+yesNo(*member.Masked))
+		}
+		blocks = append(blocks, strings.Join(lines, "\n"))
+	}
+	return strings.Join(blocks, "\n\n"), nil
 }
 
 // FormatNow formats a Now struct as human-readable key: value lines or as JSON.
@@ -342,15 +430,45 @@ func intPtr(value any) *int {
 	if value == nil {
 		return nil
 	}
-	if f, ok := value.(float64); ok {
-		i := int(f)
-		return &i
+	switch value := value.(type) {
+	case json.Number:
+		return decimalIntPtr(value.String())
+	case string:
+		return decimalIntPtr(value)
+	case float32:
+		return floatIntPtr(float64(value))
+	case float64:
+		return floatIntPtr(value)
+	default:
+		return decimalIntPtr(stringValue(value))
 	}
-	i, err := strconv.Atoi(stringValue(value))
+}
+
+func decimalIntPtr(value string) *int {
+	i, err := strconv.ParseInt(value, 10, strconv.IntSize)
 	if err != nil {
 		return nil
 	}
-	return &i
+	result := int(i)
+	return &result
+}
+
+func floatIntPtr(value float64) *int {
+	if math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value {
+		return nil
+	}
+	if strconv.IntSize == 32 {
+		if value < -1<<31 || value > 1<<31-1 {
+			return nil
+		}
+	} else if value < -1<<63 || value >= 1<<63 {
+		return nil
+	}
+	result := int(value)
+	if float64(result) != value {
+		return nil
+	}
+	return &result
 }
 
 func bool01(value any) *bool {

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -212,11 +213,85 @@ func (c *Client) request(rawURL string) (any, error) {
 	if text == "" {
 		return "", nil
 	}
-	var value any
-	if err := json.Unmarshal([]byte(text), &value); err == nil {
-		return value, nil
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	if value, err := decodeJSONValue(decoder, 0); err == nil {
+		if _, err := decoder.Token(); err == io.EOF {
+			return value, nil
+		}
 	}
 	return text, nil
+}
+
+const maxDeviceJSONDepth = 128
+
+// decodeJSONValue decodes one JSON value without allowing duplicate object
+// keys to overwrite a previously decoded value. Decoder.Token honors
+// UseNumber, so all JSON numbers retain their original representation.
+func decodeJSONValue(decoder *json.Decoder, depth int) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	return decodeJSONToken(decoder, token, depth)
+}
+
+func decodeJSONToken(decoder *json.Decoder, token json.Token, depth int) (any, error) {
+	switch token := token.(type) {
+	case json.Delim:
+		if depth >= maxDeviceJSONDepth {
+			return nil, fmt.Errorf("JSON nesting exceeds maximum depth %d", maxDeviceJSONDepth)
+		}
+		switch token {
+		case '{':
+			object := make(map[string]any)
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return nil, err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return nil, fmt.Errorf("JSON object key is not a string")
+				}
+				if _, exists := object[key]; exists {
+					return nil, fmt.Errorf("duplicate JSON object key %q", key)
+				}
+				value, err := decodeJSONValue(decoder, depth+1)
+				if err != nil {
+					return nil, err
+				}
+				object[key] = value
+			}
+			if end, err := decoder.Token(); err != nil {
+				return nil, err
+			} else if end != json.Delim('}') {
+				return nil, fmt.Errorf("JSON object has unexpected closing token %v", end)
+			}
+			return object, nil
+		case '[':
+			array := make([]any, 0)
+			for decoder.More() {
+				value, err := decodeJSONValue(decoder, depth+1)
+				if err != nil {
+					return nil, err
+				}
+				array = append(array, value)
+			}
+			if end, err := decoder.Token(); err != nil {
+				return nil, err
+			} else if end != json.Delim(']') {
+				return nil, fmt.Errorf("JSON array has unexpected closing token %v", end)
+			}
+			return array, nil
+		default:
+			return nil, fmt.Errorf("unexpected JSON delimiter %q", token)
+		}
+	case string, bool, nil, json.Number:
+		return token, nil
+	default:
+		return nil, fmt.Errorf("unexpected JSON token %v", token)
+	}
 }
 
 func responseSnippet(text string) string {

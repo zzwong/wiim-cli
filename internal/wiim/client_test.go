@@ -1,6 +1,7 @@
 package wiim
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -39,6 +40,188 @@ func TestCommandBuildsHTTPSURLAndDecodesJSON(t *testing.T) {
 	m := value.(map[string]any)
 	if m["ok"] != "yes" {
 		t.Fatalf("value %#v", value)
+	}
+}
+
+func TestCommandUsesJSONNumbersAndRejectsTrailingGarbage(t *testing.T) {
+	responses := []string{
+		`{"large":9007199254740993,"vol":38}`,
+		" \n{\"ok\":true} trailing\t",
+	}
+	client := NewClient("host", 3)
+	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		body := responses[0]
+		responses = responses[1:]
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+
+	value, err := client.Command("first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("value = %T, want object", value)
+	}
+	if number, ok := decoded["large"].(json.Number); !ok || number != "9007199254740993" {
+		t.Fatalf("large = %#v (%T), want json.Number", decoded["large"], decoded["large"])
+	}
+	if volume := intPtr(decoded["vol"]); volume == nil || *volume != 38 {
+		t.Fatalf("volume = %#v, want 38", volume)
+	}
+
+	value, err = client.Command("second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != `{"ok":true} trailing` {
+		t.Fatalf("value = %#v, want trimmed text fallback", value)
+	}
+}
+
+func TestCommandRejectsDuplicateJSONObjectKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "top level", body: `{"slaves":0,"slaves":1,"slave_list":[]}`},
+		{name: "nested member", body: `{"slaves":1,"slave_list":[{"name":"Kitchen","name":"Office"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClient("host", 3)
+			client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header)}, nil
+			})}
+
+			value, err := client.Command("getStatusEx")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if value != tc.body {
+				t.Fatalf("value = %#v, want plain-text fallback %q", value, tc.body)
+			}
+		})
+	}
+}
+
+func TestCommandFallsBackForMultipleTopLevelJSONValues(t *testing.T) {
+	const body = `{"ok":true} {"next":true}`
+	client := NewClient("host", 3)
+	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+
+	value, err := client.Command("getStatusEx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != body {
+		t.Fatalf("value = %#v, want plain-text fallback %q", value, body)
+	}
+}
+
+func TestCommandDecodesScalarJSONValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want any
+	}{
+		{name: "string", body: `"ready"`, want: "ready"},
+		{name: "bool", body: `true`, want: true},
+		{name: "null", body: `null`, want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClient("host", 3)
+			client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header)}, nil
+			})}
+
+			value, err := client.Command("getStatusEx")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if value != tc.want {
+				t.Fatalf("value = %#v (%T), want %#v (%T)", value, value, tc.want, tc.want)
+			}
+		})
+	}
+}
+
+func TestCommandBoundsDeviceJSONNesting(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		open     string
+		close    string
+		wantType string
+	}{
+		{name: "arrays", open: "[", close: "]", wantType: "array"},
+		{name: "objects", open: `{"value":`, close: "}", wantType: "object"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, depth := range []int{maxDeviceJSONDepth, maxDeviceJSONDepth + 1} {
+				body := strings.Repeat(tc.open, depth) + "null" + strings.Repeat(tc.close, depth)
+				client := NewClient("host", 3)
+				client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+				})}
+
+				value, err := client.Command("getStatusEx")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if depth == maxDeviceJSONDepth {
+					var ok bool
+					if tc.wantType == "array" {
+						_, ok = value.([]any)
+					} else {
+						_, ok = value.(map[string]any)
+					}
+					if !ok {
+						t.Fatalf("depth %d value = %T, want %s", depth, value, tc.wantType)
+					}
+				} else if value != body {
+					t.Fatalf("depth %d value = %#v, want plain-text fallback %q", depth, value, body)
+				}
+			}
+		})
+	}
+}
+
+func TestCommandDecodesUniqueNestedJSON(t *testing.T) {
+	const body = `{"slaves":1,"slave_list":[{"name":"Kitchen","details":{"volume":9007199254740993}}],"active":true,"unset":null}`
+	client := NewClient("host", 3)
+	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+
+	value, err := client.Command("multiroom:getSlaveList")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("value = %T, want object", value)
+	}
+	if response["active"] != true {
+		t.Fatalf("active = %#v, want true", response["active"])
+	}
+	if unset, exists := response["unset"]; !exists || unset != nil {
+		t.Fatalf("unset = %#v, exists = %t; want present null", unset, exists)
+	}
+	members, ok := response["slave_list"].([]any)
+	if !ok || len(members) != 1 {
+		t.Fatalf("slave_list = %#v, want one-element array", response["slave_list"])
+	}
+	member, ok := members[0].(map[string]any)
+	if !ok || member["name"] != "Kitchen" {
+		t.Fatalf("member = %#v", members[0])
+	}
+	details, ok := member["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("details = %#v, want object", member["details"])
+	}
+	if number, ok := details["volume"].(json.Number); !ok || number != "9007199254740993" {
+		t.Fatalf("volume = %#v (%T), want json.Number", details["volume"], details["volume"])
 	}
 }
 

@@ -2,6 +2,8 @@ package wiim
 
 import (
 	"encoding/json"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -19,6 +21,75 @@ func TestNormalizeStatusCombinesSources(t *testing.T) {
 	}
 	if status.Muted == nil || *status.Muted {
 		t.Fatalf("muted %#v", status.Muted)
+	}
+}
+
+func TestNormalizeStatusAcceptsJSONNumber(t *testing.T) {
+	status := NormalizeStatus("192.0.2.10", nil, map[string]any{"vol": json.Number("38")}, nil)
+	if status.Volume == nil || *status.Volume != 38 {
+		t.Fatalf("volume %#v", status.Volume)
+	}
+}
+
+func TestIntPtrNumericConversions(t *testing.T) {
+	maxIntValue := int(^uint(0) >> 1)
+	maxText := strconv.Itoa(maxIntValue)
+	valid := []struct {
+		name  string
+		value any
+		want  int
+	}{
+		{"numeric string", "38", 38},
+		{"json number", json.Number("38"), 38},
+		{"float32", float32(38), 38},
+		{"float64", float64(38), 38},
+		{"maximum numeric string", maxText, maxIntValue},
+		{"maximum json number", json.Number(maxText), maxIntValue},
+	}
+	if strconv.IntSize == 32 {
+		valid = append(valid, struct {
+			name  string
+			value any
+			want  int
+		}{"maximum float64", float64(maxIntValue), maxIntValue})
+	}
+	for _, tc := range valid {
+		t.Run(tc.name, func(t *testing.T) {
+			got := intPtr(tc.value)
+			if got == nil || *got != tc.want {
+				t.Fatalf("intPtr(%T(%v)) = %v, want %d", tc.value, tc.value, got, tc.want)
+			}
+		})
+	}
+
+	var overflow string
+	if strconv.IntSize == 32 {
+		overflow = "2147483648"
+	} else {
+		overflow = "9223372036854775808"
+	}
+	invalid := []any{
+		nil,
+		true,
+		struct{}{},
+		"38.0",
+		json.Number("38.0"),
+		overflow,
+		json.Number(overflow),
+		float64(38.5),
+		math.NaN(),
+		math.Inf(1),
+		math.Inf(-1),
+	}
+	if strconv.IntSize == 32 {
+		invalid = append(invalid, float64(maxIntValue)+1)
+	} else {
+		invalid = append(invalid, float64(maxIntValue))
+	}
+	for _, value := range invalid {
+		if got := intPtr(value); got != nil {
+			t.Errorf("intPtr(%T(%v)) = %d, want nil", value, value, *got)
+		}
 	}
 }
 
@@ -42,6 +113,194 @@ func TestFormatStatusJSONAndHuman(t *testing.T) {
 		if !strings.Contains(human, want) {
 			t.Fatalf("missing %s in %s", want, human)
 		}
+	}
+}
+
+func TestFormatGroupStatusExactHumanAndJSON(t *testing.T) {
+	status := GroupStatus{
+		Name:        "Living Room",
+		Host:        "speaker.local",
+		Model:       "WiiM_Ultra",
+		Firmware:    "4.8.123",
+		Role:        "master",
+		Grouped:     true,
+		GroupName:   "Downstairs",
+		MemberCount: 2,
+		WMRMVersion: "4.2",
+		MasterUUID:  "master-uuid",
+	}
+	human, err := FormatGroupStatus(status, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHuman := "Name: Living Room\nHost: speaker.local\nModel: WiiM_Ultra\nFirmware: 4.8.123\nRole: master\nGrouped: yes\nGroup name: Downstairs\nMember count: 2\nWMRM version: 4.2\nMaster UUID: master-uuid"
+	if human != wantHuman {
+		t.Fatalf("human = %q, want %q", human, wantHuman)
+	}
+	output, err := FormatGroupStatus(status, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := `{
+  "name": "Living Room",
+  "host": "speaker.local",
+  "model": "WiiM_Ultra",
+  "firmware": "4.8.123",
+  "role": "master",
+  "grouped": true,
+  "groupName": "Downstairs",
+  "memberCount": 2,
+  "wmrmVersion": "4.2",
+  "masterUUID": "master-uuid"
+}`
+	if output != wantJSON {
+		t.Fatalf("JSON = %q, want %q", output, wantJSON)
+	}
+}
+
+func TestFormatGroupStatusEscapesHumanStrings(t *testing.T) {
+	unsafe := "line\nreturn\ttab\ransi\x1b[31m\"slash\\ unicode ☃\x00\x7f"
+	escaped := `line\nreturn\ttab\ransi\x1b[31m\"slash\\ unicode ☃\x00\x7f`
+	status := GroupStatus{
+		Name:        unsafe,
+		Host:        unsafe,
+		Model:       unsafe,
+		Firmware:    unsafe,
+		Role:        unsafe,
+		Grouped:     true,
+		GroupName:   unsafe,
+		MemberCount: 1,
+		WMRMVersion: unsafe,
+		MasterUUID:  unsafe,
+	}
+
+	human, err := FormatGroupStatus(status, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"Name: " + escaped,
+		"Host: " + escaped,
+		"Model: " + escaped,
+		"Firmware: " + escaped,
+		"Role: " + escaped,
+		"Grouped: yes",
+		"Group name: " + escaped,
+		"Member count: 1",
+		"WMRM version: " + escaped,
+		"Master UUID: " + escaped,
+	}, "\n")
+	if human != want {
+		t.Fatalf("human = %q, want %q", human, want)
+	}
+	assertNoRawControlsExceptNewline(t, human)
+}
+
+func TestFormatGroupMembersEscapesHumanStrings(t *testing.T) {
+	unsafe := "line\nreturn\ttab\ransi\x1b[31m\"slash\\ unicode ☃\x00\x7f"
+	escaped := `line\nreturn\ttab\ransi\x1b[31m\"slash\\ unicode ☃\x00\x7f`
+	group := GroupMembers{Members: []GroupMember{{
+		Name: unsafe, UUID: unsafe, IP: unsafe, Version: unsafe, Type: unsafe,
+	}}}
+
+	human, err := FormatGroupMembers(group, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"Member 1:",
+		"Name: " + escaped,
+		"UUID: " + escaped,
+		"IP: " + escaped,
+		"Version: " + escaped,
+		"Type: " + escaped,
+	}, "\n")
+	if human != want {
+		t.Fatalf("human = %q, want %q", human, want)
+	}
+	assertNoRawControlsExceptNewline(t, human)
+}
+
+func assertNoRawControlsExceptNewline(t *testing.T, text string) {
+	t.Helper()
+	for _, r := range text {
+		if r != '\n' && (r < 0x20 || r == 0x7f) {
+			t.Errorf("human output contains raw control U+%04X: %q", r, text)
+		}
+	}
+}
+
+func TestFormatGroupMembersExactHumanJSONAndOrder(t *testing.T) {
+	zero := 0
+	no := false
+	yes := true
+	group := GroupMembers{
+		WMRMVersion: "4.2",
+		Count:       2,
+		Members: []GroupMember{
+			{Name: "First", UUID: "u1", IP: "192.0.2.1", Version: "4.2", Type: "A31", Channel: &zero, Volume: &zero, Muted: &no, BatteryPercent: &zero, BatteryCharging: &no, Masked: &no},
+			{Name: "Second", Volume: &zero, Muted: &yes},
+		},
+	}
+	human, err := FormatGroupMembers(group, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHuman := "Member 1:\nName: First\nUUID: u1\nIP: 192.0.2.1\nVersion: 4.2\nType: A31\nChannel: 0\nVolume: 0\nMuted: no\nBattery percent: 0\nBattery charging: no\nMasked: no\n\nMember 2:\nName: Second\nVolume: 0\nMuted: yes"
+	if human != wantHuman {
+		t.Fatalf("human = %q, want %q", human, wantHuman)
+	}
+	output, err := FormatGroupMembers(group, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := `{
+  "wmrmVersion": "4.2",
+  "count": 2,
+  "members": [
+    {
+      "name": "First",
+      "uuid": "u1",
+      "ip": "192.0.2.1",
+      "version": "4.2",
+      "type": "A31",
+      "channel": 0,
+      "volume": 0,
+      "muted": false,
+      "batteryPercent": 0,
+      "batteryCharging": false,
+      "masked": false
+    },
+    {
+      "name": "Second",
+      "volume": 0,
+      "muted": true
+    }
+  ]
+}`
+	if output != wantJSON {
+		t.Fatalf("JSON = %q, want %q", output, wantJSON)
+	}
+}
+
+func TestFormatGroupMembersEmptyUsesNonNilJSONArray(t *testing.T) {
+	human, err := FormatGroupMembers(GroupMembers{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if human != "No group members." {
+		t.Fatalf("human = %q", human)
+	}
+	output, err := FormatGroupMembers(GroupMembers{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := `{
+  "count": 0,
+  "members": []
+}`
+	if output != wantJSON {
+		t.Fatalf("JSON = %q, want %q", output, wantJSON)
 	}
 }
 

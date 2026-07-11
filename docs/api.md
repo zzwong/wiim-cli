@@ -217,6 +217,14 @@ the CLI does not discover a master, switch to another device, or change the sele
 profile. Thus a selected guest can report `slave`; the result describes the selected
 host's view of the group.
 
+### Live standalone validation
+
+On 2026-07-10, a WiiM Ultra was verified in standalone mode using the read-only multiroom
+commands. `getStatusEx` reported `group=0` and WMRM version `4.3`, while
+`multiroom:getSlaveList` returned zero members. Both `wiim group status` and `wiim group
+members` rendered correctly. Master/slave grouped configurations remain unverified on
+hardware.
+
 ### Published response shapes and normalization
 
 The published modern shape uses lowercase keys and an array for a populated group:
@@ -316,10 +324,10 @@ must not be used for such mutations without explicit permission.
 
 These semantics and field names are based on the published Arylic/Linkplay documentation
 linked above, plus the published WiiM HTTP API PDFs listed in [Acknowledgments](#acknowledgments).
-They are documentation-based and subject to model-and-firmware variation; no grouped WiiM
-hardware has been verified for this implementation. In particular, the examples describe the
-published protocol shapes, not a claim of live grouped-hardware testing. The member GET
-itself remains read-only.
+They are subject to model-and-firmware variation. The standalone validation above is a live
+hardware check of the read-only commands; master/slave grouped configurations remain
+unverified on hardware. In particular, the examples describe the published protocol shapes,
+not a claim of live grouped-hardware testing. The member GET itself remains read-only.
 
 ## Spotify / playback notes
 

@@ -115,6 +115,8 @@ never write profiles or other config. To save a result, explicitly run `wiim dev
 | `wiim device remove <name>` | — | Removes a named profile from local config; no device API call. |
 | `wiim device use <name>` | — | Sets local `defaultDevice`; no device API call. |
 | `wiim status` | `getStatusEx`, `getPlayerStatus`, Cast `eureka_info` | Combines device/network/player state. Cast lookup is best effort. |
+| `wiim group status` | `getStatusEx`, `multiroom:getSlaveList` | Read-only group status: maps the selected device's identity and Linkplay group flag to its role, then maps the guest-device list to member count. |
+| `wiim group members` | `multiroom:getSlaveList` | Read-only list of guest devices in the selected device's multiroom group. |
 | `wiim now` | `getPlayerStatus`, `getMetaInfo` | Metadata from `getMetaInfo` is preferred; player title/artist/album may be hex encoded. `unknow`/`Unknown` is treated as missing metadata. |
 | `wiim cast-now` | Cast protocol on TLS port 8009 | Best-effort Google Cast media-session metadata query. Works only when an active Cast media session is exposed. |
 | `wiim input` | `getPlayerStatus` | Maps observed player `mode` codes to source names when known. |
@@ -192,6 +194,35 @@ Observed `getMetaInfo` fields used by the CLI:
 - `metaData.bitDepth`
 - `metaData.bitRate`
 
+## Multiroom member query
+
+The published [Arylic / Linkplay HTTP API documentation](https://developer.arylic.com/httpapi/#request-a-list-of-guest-devices-in-a-multiroom-group)
+describes `multiroom:getSlaveList` as an HTTP GET request for the list of guest devices
+in a multiroom group:
+
+```text
+GET /httpapi.asp?command=multiroom:getSlaveList
+```
+
+This is a read-only query; it does not add, remove, mute, or otherwise change group
+membership. The documented populated response has a numeric `slaves` count, a
+`wmrm_version`, and a `slave_list` array of guest-device objects (`name`, `uuid`, `ip`,
+`version`, `type`, `channel`, `volume`, `mute`, and battery fields). The documented
+standalone/zero-member response has `"slaves": 0` and `"wmrm_version"` with no
+`slave_list`; populated responses include the array. The CLI accepts these modern zero
+and populated shapes and normalizes them for `wiim group members`.
+
+`wiim group status` combines `getStatusEx` with that query: the `group` flag and guest
+list determine the selected device's role (`master`, `slave`, `standalone`, or
+`unknown`), while `GroupName`, `master_uuid`, identity fields, and the normalized guest
+list provide group metadata and member count. `wiim group members` exposes the
+normalized guest-device list directly.
+
+This implementation is based on the published Arylic/Linkplay semantics, not live
+verification against WiiM hardware in a grouped configuration. Firmware and product
+variants may differ in field names, types, or response details; the GET itself remains
+read-only.
+
 ## Spotify / playback notes
 
 Spotify Connect is its own playback/session protocol. WiiM transport commands such as `setPlayerCmd:play` and `setPlayerCmd:pause` can control playback once the WiiM is already the active Spotify Connect target, but they do not browse Spotify, choose a playlist, or start an arbitrary Spotify session by themselves.
@@ -220,7 +251,6 @@ Potential future commands to verify before adding first-class CLI support:
 ```text
 setPlayerCmd:playlist:url:<index>
 setPlayerCmd:hex_playlist:url:<index>
-multiroom:getSlaveList
 ```
 
 ## cliamp bridge

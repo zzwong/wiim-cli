@@ -76,6 +76,9 @@ func TestDispatchGroupStatusUsesOnlyStatusExThenOneMemberCommand(t *testing.T) {
 		t.Fatalf("unexpected reads: cast=%d player=%d meta=%d", fd.castInfoCalls, fd.playerStatusCalls, fd.metaInfoCalls)
 	}
 
+	fd.readCalls = nil
+	fd.statusExCalls = 0
+	fd.commandCalls = 0
 	output, err = dispatchGroup([]string{"status"}, options{asJSON: true}, "speaker.local", fd)
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +89,42 @@ func TestDispatchGroupStatusUsesOnlyStatusExThenOneMemberCommand(t *testing.T) {
 	}
 	if status.Host != "speaker.local" || status.Role != "master" || status.MemberCount != 1 {
 		t.Fatalf("JSON status = %#v", status)
+	}
+	if got, want := strings.Join(fd.readCalls, ","), "StatusEx,Command:multiroom:getSlaveList"; got != want || fd.statusExCalls != 1 || fd.commandCalls != 1 {
+		t.Fatalf("JSON calls = %#v, status count = %d, command count = %d; want [%s], 1, 1", fd.readCalls, fd.statusExCalls, fd.commandCalls, want)
+	}
+}
+
+func TestDispatchGroupStatusSecondRequestFailureHasNoPartialJSONOutput(t *testing.T) {
+	fd, done := withFake(t)
+	defer done()
+	fd.statusEx = map[string]any{"DeviceName": "Living Room", "group": 0}
+	fd.commandErr = runtimef("member request failed")
+
+	var stdout, stderr bytes.Buffer
+	err := Run([]string{"group", "status", "--host", "speaker.local", "--json"}, &stdout, &stderr)
+	if _, ok := err.(RuntimeError); !ok {
+		t.Fatalf("error type = %T, want RuntimeError: %v", err, err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no partial output", stdout.String())
+	}
+	if got, want := strings.Join(fd.readCalls, ","), "StatusEx,Command:multiroom:getSlaveList"; got != want {
+		t.Fatalf("calls = %#v, want [%s]", fd.readCalls, want)
+	}
+
+	var envelope struct {
+		Error struct {
+			Kind     string `json:"kind"`
+			Message  string `json:"message"`
+			ExitCode int    `json:"exitCode"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &envelope); err != nil {
+		t.Fatalf("error envelope %q: %v", stderr.String(), err)
+	}
+	if envelope.Error.Kind != "runtime" || envelope.Error.Message != "member request failed" || envelope.Error.ExitCode != 1 {
+		t.Fatalf("error envelope = %#v", envelope.Error)
 	}
 }
 

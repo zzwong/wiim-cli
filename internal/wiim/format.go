@@ -132,8 +132,11 @@ func FormatStatus(status Status, asJSON bool) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
-// FormatNow formats a Now struct as human-readable key: value lines or as JSON.
-// Empty fields are omitted from the output.
+func quoteHuman(value string) string {
+	quoted := strconv.QuoteToGraphic(value)
+	return quoted[1 : len(quoted)-1]
+}
+
 // FormatGroupStatus formats a GroupStatus as compact labeled fields or JSON.
 func FormatGroupStatus(status GroupStatus, asJSON bool) (string, error) {
 	if asJSON {
@@ -141,28 +144,28 @@ func FormatGroupStatus(status GroupStatus, asJSON bool) (string, error) {
 	}
 	var lines []string
 	if status.Name != "" {
-		lines = append(lines, "Name: "+status.Name)
+		lines = append(lines, "Name: "+quoteHuman(status.Name))
 	}
-	lines = append(lines, "Host: "+status.Host)
+	lines = append(lines, "Host: "+quoteHuman(status.Host))
 	if status.Model != "" {
-		lines = append(lines, "Model: "+status.Model)
+		lines = append(lines, "Model: "+quoteHuman(status.Model))
 	}
 	if status.Firmware != "" {
-		lines = append(lines, "Firmware: "+status.Firmware)
+		lines = append(lines, "Firmware: "+quoteHuman(status.Firmware))
 	}
 	lines = append(lines,
-		"Role: "+status.Role,
+		"Role: "+quoteHuman(status.Role),
 		"Grouped: "+yesNo(status.Grouped),
 	)
 	if status.GroupName != "" {
-		lines = append(lines, "Group name: "+status.GroupName)
+		lines = append(lines, "Group name: "+quoteHuman(status.GroupName))
 	}
 	lines = append(lines, fmt.Sprintf("Member count: %d", status.MemberCount))
 	if status.WMRMVersion != "" {
-		lines = append(lines, "WMRM version: "+status.WMRMVersion)
+		lines = append(lines, "WMRM version: "+quoteHuman(status.WMRMVersion))
 	}
 	if status.MasterUUID != "" {
-		lines = append(lines, "Master UUID: "+status.MasterUUID)
+		lines = append(lines, "Master UUID: "+quoteHuman(status.MasterUUID))
 	}
 	return strings.Join(lines, "\n"), nil
 }
@@ -190,7 +193,7 @@ func FormatGroupMembers(group GroupMembers, asJSON bool) (string, error) {
 			{"Type", member.Type},
 		} {
 			if field[1] != "" {
-				lines = append(lines, field[0]+": "+field[1])
+				lines = append(lines, field[0]+": "+quoteHuman(field[1]))
 			}
 		}
 		if member.Channel != nil {
@@ -216,6 +219,8 @@ func FormatGroupMembers(group GroupMembers, asJSON bool) (string, error) {
 	return strings.Join(blocks, "\n\n"), nil
 }
 
+// FormatNow formats a Now struct as human-readable key: value lines or as JSON.
+// Empty fields are omitted from the output.
 func FormatNow(now Now, asJSON bool) (string, error) {
 	if asJSON {
 		return jsonText(now)

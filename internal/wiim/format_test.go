@@ -158,6 +158,78 @@ func TestFormatGroupStatusExactHumanAndJSON(t *testing.T) {
 	}
 }
 
+func TestFormatGroupStatusEscapesHumanStrings(t *testing.T) {
+	unsafe := "line\nreturn\ttab\ransi\x1b[31m\"slash\\ unicode ☃\x00\x7f"
+	escaped := `line\nreturn\ttab\ransi\x1b[31m\"slash\\ unicode ☃\x00\x7f`
+	status := GroupStatus{
+		Name:        unsafe,
+		Host:        unsafe,
+		Model:       unsafe,
+		Firmware:    unsafe,
+		Role:        unsafe,
+		Grouped:     true,
+		GroupName:   unsafe,
+		MemberCount: 1,
+		WMRMVersion: unsafe,
+		MasterUUID:  unsafe,
+	}
+
+	human, err := FormatGroupStatus(status, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"Name: " + escaped,
+		"Host: " + escaped,
+		"Model: " + escaped,
+		"Firmware: " + escaped,
+		"Role: " + escaped,
+		"Grouped: yes",
+		"Group name: " + escaped,
+		"Member count: 1",
+		"WMRM version: " + escaped,
+		"Master UUID: " + escaped,
+	}, "\n")
+	if human != want {
+		t.Fatalf("human = %q, want %q", human, want)
+	}
+	assertNoRawControlsExceptNewline(t, human)
+}
+
+func TestFormatGroupMembersEscapesHumanStrings(t *testing.T) {
+	unsafe := "line\nreturn\ttab\ransi\x1b[31m\"slash\\ unicode ☃\x00\x7f"
+	escaped := `line\nreturn\ttab\ransi\x1b[31m\"slash\\ unicode ☃\x00\x7f`
+	group := GroupMembers{Members: []GroupMember{{
+		Name: unsafe, UUID: unsafe, IP: unsafe, Version: unsafe, Type: unsafe,
+	}}}
+
+	human, err := FormatGroupMembers(group, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"Member 1:",
+		"Name: " + escaped,
+		"UUID: " + escaped,
+		"IP: " + escaped,
+		"Version: " + escaped,
+		"Type: " + escaped,
+	}, "\n")
+	if human != want {
+		t.Fatalf("human = %q, want %q", human, want)
+	}
+	assertNoRawControlsExceptNewline(t, human)
+}
+
+func assertNoRawControlsExceptNewline(t *testing.T, text string) {
+	t.Helper()
+	for _, r := range text {
+		if r != '\n' && (r < 0x20 || r == 0x7f) {
+			t.Errorf("human output contains raw control U+%04X: %q", r, text)
+		}
+	}
+}
+
 func TestFormatGroupMembersExactHumanJSONAndOrder(t *testing.T) {
 	zero := 0
 	no := false

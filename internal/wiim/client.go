@@ -215,7 +215,7 @@ func (c *Client) request(rawURL string) (any, error) {
 	}
 	decoder := json.NewDecoder(strings.NewReader(text))
 	decoder.UseNumber()
-	if value, err := decodeJSONValue(decoder); err == nil {
+	if value, err := decodeJSONValue(decoder, 0); err == nil {
 		if _, err := decoder.Token(); err == io.EOF {
 			return value, nil
 		}
@@ -223,20 +223,25 @@ func (c *Client) request(rawURL string) (any, error) {
 	return text, nil
 }
 
+const maxDeviceJSONDepth = 128
+
 // decodeJSONValue decodes one JSON value without allowing duplicate object
 // keys to overwrite a previously decoded value. Decoder.Token honors
 // UseNumber, so all JSON numbers retain their original representation.
-func decodeJSONValue(decoder *json.Decoder) (any, error) {
+func decodeJSONValue(decoder *json.Decoder, depth int) (any, error) {
 	token, err := decoder.Token()
 	if err != nil {
 		return nil, err
 	}
-	return decodeJSONToken(decoder, token)
+	return decodeJSONToken(decoder, token, depth)
 }
 
-func decodeJSONToken(decoder *json.Decoder, token json.Token) (any, error) {
+func decodeJSONToken(decoder *json.Decoder, token json.Token, depth int) (any, error) {
 	switch token := token.(type) {
 	case json.Delim:
+		if depth >= maxDeviceJSONDepth {
+			return nil, fmt.Errorf("JSON nesting exceeds maximum depth %d", maxDeviceJSONDepth)
+		}
 		switch token {
 		case '{':
 			object := make(map[string]any)
@@ -252,7 +257,7 @@ func decodeJSONToken(decoder *json.Decoder, token json.Token) (any, error) {
 				if _, exists := object[key]; exists {
 					return nil, fmt.Errorf("duplicate JSON object key %q", key)
 				}
-				value, err := decodeJSONValue(decoder)
+				value, err := decodeJSONValue(decoder, depth+1)
 				if err != nil {
 					return nil, err
 				}
@@ -267,7 +272,7 @@ func decodeJSONToken(decoder *json.Decoder, token json.Token) (any, error) {
 		case '[':
 			array := make([]any, 0)
 			for decoder.More() {
-				value, err := decodeJSONValue(decoder)
+				value, err := decodeJSONValue(decoder, depth+1)
 				if err != nil {
 					return nil, err
 				}

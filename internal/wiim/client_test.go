@@ -104,6 +104,89 @@ func TestCommandRejectsDuplicateJSONObjectKeys(t *testing.T) {
 	}
 }
 
+func TestCommandFallsBackForMultipleTopLevelJSONValues(t *testing.T) {
+	const body = `{"ok":true} {"next":true}`
+	client := NewClient("host", 3)
+	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+
+	value, err := client.Command("getStatusEx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != body {
+		t.Fatalf("value = %#v, want plain-text fallback %q", value, body)
+	}
+}
+
+func TestCommandDecodesScalarJSONValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want any
+	}{
+		{name: "string", body: `"ready"`, want: "ready"},
+		{name: "bool", body: `true`, want: true},
+		{name: "null", body: `null`, want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClient("host", 3)
+			client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header)}, nil
+			})}
+
+			value, err := client.Command("getStatusEx")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if value != tc.want {
+				t.Fatalf("value = %#v (%T), want %#v (%T)", value, value, tc.want, tc.want)
+			}
+		})
+	}
+}
+
+func TestCommandBoundsDeviceJSONNesting(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		open     string
+		close    string
+		wantType string
+	}{
+		{name: "arrays", open: "[", close: "]", wantType: "array"},
+		{name: "objects", open: `{"value":`, close: "}", wantType: "object"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, depth := range []int{maxDeviceJSONDepth, maxDeviceJSONDepth + 1} {
+				body := strings.Repeat(tc.open, depth) + "null" + strings.Repeat(tc.close, depth)
+				client := NewClient("host", 3)
+				client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+				})}
+
+				value, err := client.Command("getStatusEx")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if depth == maxDeviceJSONDepth {
+					var ok bool
+					if tc.wantType == "array" {
+						_, ok = value.([]any)
+					} else {
+						_, ok = value.(map[string]any)
+					}
+					if !ok {
+						t.Fatalf("depth %d value = %T, want %s", depth, value, tc.wantType)
+					}
+				} else if value != body {
+					t.Fatalf("depth %d value = %#v, want plain-text fallback %q", depth, value, body)
+				}
+			}
+		})
+	}
+}
+
 func TestCommandDecodesUniqueNestedJSON(t *testing.T) {
 	const body = `{"slaves":1,"slave_list":[{"name":"Kitchen","details":{"volume":9007199254740993}}],"active":true,"unset":null}`
 	client := NewClient("host", 3)

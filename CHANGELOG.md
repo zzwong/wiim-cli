@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `use` commands plus one-shot `--device <name>` targeting.
 - `wiim device discover` as a discovery alias and documented discovery-to-config workflow;
   discovery remains hostless and read-only.
+- Read-only `wiim group status` and `wiim group members` inspection, with normalization for
+  modern lowercase and legacy capitalized multiroom responses, stable JSON fields, and no
+  support for mutating group membership or group audio state.
 
 ### Fixed
 

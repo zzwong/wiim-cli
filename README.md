@@ -136,6 +136,12 @@ wiim --json status
 wiim now
 wiim cast-now
 
+# Multiroom group inspection (read-only)
+wiim --device living-room group status
+wiim --device living-room group members
+wiim --device living-room --json group status
+wiim --device living-room --json group members
+
 # Playback
 wiim play
 wiim pause
@@ -193,6 +199,18 @@ config and applies only to commands that target a WiiM (including `cliamp` hando
 it is rejected for setup, configuration, profile-management, Spotify, version, and discovery
 commands. Prefer named profiles/config for daily use, while `--host` is mainly an override for
 scripts/testing.
+
+**group status** and **group members** are read-only multiroom inspection commands. They query
+the selected host (including the host resolved from `--device <name>`); they do not change
+that profile, grouping, playback, volume, mute state, or any other audio state. `group status`
+supports `--json` and reports the stable normalized fields `name`, `host`, `model`, `firmware`,
+`role`, `grouped`, `groupName`, `memberCount`, `wmrmVersion`, and `masterUUID` (optional empty
+fields are omitted). Roles are `master` (the selected host reports guest devices), `slave` (the
+selected device reports that it is a guest), `standalone` (not grouped and has no guests), or
+`unknown` (the response does not provide enough reliable role information). `group members`
+lists the guest devices reported by the selected host and also supports `--json`; it does not
+discover or modify other devices. There is no mutating group support: join, leave, kick, group
+volume/mute, and channel changes are out of scope.
 
 **discover** and **device discover** reject explicit `--host` or `--device` flags — they
 multicast an SSDP search and only list devices that also answer the WiiM HTTP API, so

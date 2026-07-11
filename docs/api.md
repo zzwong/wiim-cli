@@ -115,8 +115,8 @@ never write profiles or other config. To save a result, explicitly run `wiim dev
 | `wiim device remove <name>` | — | Removes a named profile from local config; no device API call. |
 | `wiim device use <name>` | — | Sets local `defaultDevice`; no device API call. |
 | `wiim status` | `getStatusEx`, `getPlayerStatus`, Cast `eureka_info` | Combines device/network/player state. Cast lookup is best effort. |
-| `wiim group status` | `getStatusEx`, `multiroom:getSlaveList` | Read-only group status: maps the selected device's identity and Linkplay group flag to its role, then maps the guest-device list to member count. |
-| `wiim group members` | `multiroom:getSlaveList` | Read-only list of guest devices in the selected device's multiroom group. |
+| `wiim group status` | `getStatusEx`, then `multiroom:getSlaveList` | Read-only group status: maps the selected device's identity and Linkplay group flag to its role, then maps the guest-device list to member count. |
+| `wiim group members` | `multiroom:getSlaveList` | Read-only list of guest devices in the selected device's multiroom group; this is the only API call. |
 | `wiim now` | `getPlayerStatus`, `getMetaInfo` | Metadata from `getMetaInfo` is preferred; player title/artist/album may be hex encoded. `unknow`/`Unknown` is treated as missing metadata. |
 | `wiim cast-now` | Cast protocol on TLS port 8009 | Best-effort Google Cast media-session metadata query. Works only when an active Cast media session is exposed. |
 | `wiim input` | `getPlayerStatus` | Maps observed player `mode` codes to source names when known. |
@@ -194,34 +194,130 @@ Observed `getMetaInfo` fields used by the CLI:
 - `metaData.bitDepth`
 - `metaData.bitRate`
 
-## Multiroom member query
+## Multiroom group inspection
 
 The published [Arylic / Linkplay HTTP API documentation](https://developer.arylic.com/httpapi/#request-a-list-of-guest-devices-in-a-multiroom-group)
-describes `multiroom:getSlaveList` as an HTTP GET request for the list of guest devices
-in a multiroom group:
+defines `multiroom:getSlaveList` as the read-only request for guest devices in a
+multiroom group. The CLI uses that published Arylic/Linkplay contract for both commands;
+the API's terminology calls guest devices "slaves".
+
+### Call patterns and targeting
+
+The requests used by the mapping above are:
 
 ```text
-GET /httpapi.asp?command=multiroom:getSlaveList
+GET https://<host>/httpapi.asp?command=getStatusEx
+GET https://<host>/httpapi.asp?command=multiroom:getSlaveList
 ```
 
-This is a read-only query; it does not add, remove, mute, or otherwise change group
-membership. The documented populated response has a numeric `slaves` count, a
-`wmrm_version`, and a `slave_list` array of guest-device objects (`name`, `uuid`, `ip`,
-`version`, `type`, `channel`, `volume`, `mute`, and battery fields). The documented
-standalone/zero-member response has `"slaves": 0` and `"wmrm_version"` with no
-`slave_list`; populated responses include the array. The CLI accepts these modern zero
-and populated shapes and normalizes them for `wiim group members`.
+`group status` always performs the `getStatusEx` call first and then the member query;
+`group members` performs only the member query. Neither command calls playback, volume,
+or other mutating APIs. The selected device/profile is treated as the group API host:
+the CLI does not discover a master, switch to another device, or change the selected
+profile. Thus a selected guest can report `slave`; the result describes the selected
+host's view of the group.
 
-`wiim group status` combines `getStatusEx` with that query: the `group` flag and guest
-list determine the selected device's role (`master`, `slave`, `standalone`, or
-`unknown`), while `GroupName`, `master_uuid`, identity fields, and the normalized guest
-list provide group metadata and member count. `wiim group members` exposes the
-normalized guest-device list directly.
+### Published response shapes and normalization
 
-This implementation is based on the published Arylic/Linkplay semantics, not live
-verification against WiiM hardware in a grouped configuration. Firmware and product
-variants may differ in field names, types, or response details; the GET itself remains
-read-only.
+The published modern shape uses lowercase keys and an array for a populated group:
+
+```json
+{
+  "slaves": 1,
+  "wmrm_version": "4.2",
+  "slave_list": [{
+    "name": "Kitchen",
+    "uuid": "guest-uuid",
+    "ip": "192.0.2.21",
+    "version": "4.2",
+    "type": "A31",
+    "channel": 0,
+    "volume": 20,
+    "mute": 0,
+    "battery_percent": 100,
+    "battery_charging": 0
+  }]
+}
+```
+
+Older/legacy firmware may return the same shape with capitalized keys and scalar
+encodings, for example:
+
+```json
+{
+  "Slaves": "1",
+  "WMRM_Version": "4.2",
+  "Slave_list": [{
+    "Name": "Kitchen",
+    "UUID": "guest-uuid",
+    "Ip": "192.0.2.21",
+    "Version": "4.2",
+    "Type": "A31",
+    "Channel": "0",
+    "Volume": "20",
+    "Mute": "0",
+    "Battery_percent": "100",
+    "Battery_charging": "false",
+    "Mask": "0"
+  }]
+}
+```
+
+The normalizer accepts these modern lowercase and legacy capitalized forms, including a
+single guest object in `slave_list`, but emits a strict stable schema. `wiim group members
+--json` has these top-level fields:
+
+- `wmrmVersion` (optional string), `count` (integer), and `members` (always an array).
+- Each member may contain `name`, `uuid`, `ip`, `version`, and `type` (strings); `channel`,
+  `volume`, and `batteryPercent` (integers); and `muted`, `batteryCharging`, and `masked`
+  (booleans). Optional fields are omitted when the source does not provide them.
+
+`slaves` is the guest count, not a count including the selected host. `slaves: 0` means the
+selected host reports no guest members (the published standalone response); the role is
+`standalone` only when `getStatusEx` also reports `group: 0`. A selected guest can report
+`slave` even with no guest members of its own. The documented zero-member response may omit
+`slave_list` (an empty array is accepted too). For a populated response, `slaves` must equal
+the number of `slave_list` entries. The CLI rejects missing lists for nonzero counts,
+mismatched counts, malformed required values, and duplicate keys that differ only by
+capitalization. The normalized `count` and `members` length are consequently always
+consistent.
+
+### Group status schema and role derivation
+
+`wiim group status --json` emits the stable fields `name`, `host`, `model`, `firmware`,
+`role`, `grouped`, `groupName`, `memberCount`, `wmrmVersion`, and `masterUUID`; optional
+empty identity/group fields are omitted. `name`, `model`, and `firmware` come from
+`DeviceName`, `project`, and `firmware` in `getStatusEx`. `groupName`, `masterUUID`, and
+`wmrmVersion` come from `GroupName`, `master_uuid`, and `wmrm_version` (with the member
+response's `wmrm_version` taking precedence).
+
+Role derivation uses the selected host's `getStatusEx` `group` flag and normalized guest
+list:
+
+- `group: 1` → `slave`, `grouped: true`.
+- `group: 0` with one or more guests → `master`, `grouped: true`.
+- `group: 0` with no guests → `standalone`, `grouped: false`.
+- If `group` is missing or unusable, a nonempty guest list falls back to `master`; with no
+  reliable flag and no guests the role is `unknown`.
+
+`master` is the selected host reporting guests, `slave` is a selected guest device,
+`standalone` is an ungrouped device with no guests, and `unknown` means the response does
+not provide enough reliable information. `memberCount` is always the normalized guest-list
+length, not a separately trusted raw field.
+
+### Scope and compatibility
+
+Both commands are read-only and never mutate grouping or audio. First-class group mutation is
+out of scope: join/add, leave/remove, kick, group volume, group mute, and group channel
+assignment/switching are intentionally not supported. The raw escape hatch is separate and
+must not be used for such mutations without explicit permission.
+
+These semantics and field names are based on the published Arylic/Linkplay documentation
+linked above, plus the published WiiM HTTP API PDFs listed in [Acknowledgments](#acknowledgments).
+They are documentation-based and subject to model-and-firmware variation; no grouped WiiM
+hardware has been verified for this implementation. In particular, the examples describe the
+published protocol shapes, not a claim of live grouped-hardware testing. The member GET
+itself remains read-only.
 
 ## Spotify / playback notes
 

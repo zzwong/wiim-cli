@@ -30,11 +30,16 @@ wiim --device <name> volume
 wiim --device <name> preset list
 wiim --device <name> group status
 wiim --device <name> group members
+wiim --device <name> --json group status
+wiim --device <name> --json group members
 wiim device list
 wiim device discover                  # same read-only path as wiim discover
 ```
 
-`group status` and `group members` are read-only and safe to run; they inspect the selected device's multiroom group without changing playback or group membership.
+`group status` and `group members` are read-only and safe to run; they inspect the selected device's
+multiroom group on the selected host without changing grouping or audio state. They never join,
+leave, kick, or otherwise mutate a group, and do not change volume, mute, playback, or channel
+state. `--json` is available for both commands for automation.
 
 Use JSON for automation:
 
@@ -151,6 +156,8 @@ wiim spotify logout
 
 > **Warning:** `raw` can send mutating API commands, not just inspect the device. Use it
 > only with known read-only endpoints unless the user explicitly authorizes the mutation.
+> In particular, raw multiroom mutation (join, leave, kick, group volume/mute, or channel
+> changes) requires explicit permission; the first-class group commands never perform it.
 
 Use `raw` to inspect or verify known read-only endpoints:
 

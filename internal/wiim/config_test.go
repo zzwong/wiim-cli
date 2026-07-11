@@ -659,6 +659,47 @@ func TestWriteFileAtomicRenameFailurePreservesTargetAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestWriteFileAtomicOwnershipFailurePreservesTargetAndCleansUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	original := []byte("{\"complete\":\"old config\"}\n")
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	forcedErr := errors.New("forced ownership failure")
+	oldPreserveOwnership := preserveOwnership
+	oldRename := renameFile
+	preserveOwnership = func(targetPath, replacementPath string) error {
+		if targetPath != path || replacementPath == path {
+			t.Fatalf("preserveOwnership(%q, %q), want target and temporary replacement", targetPath, replacementPath)
+		}
+		return forcedErr
+	}
+	renameFile = func(string, string) error {
+		t.Fatal("rename called after ownership preservation failure")
+		return nil
+	}
+	t.Cleanup(func() {
+		preserveOwnership = oldPreserveOwnership
+		renameFile = oldRename
+	})
+
+	err := writeFileAtomic(path, []byte("{\"complete\":\"new config\"}\n"))
+	if !errors.Is(err, forcedErr) {
+		t.Fatalf("writeFileAtomic() error = %v, want %v", err, forcedErr)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("config changed after ownership failure: got %q, want %q", got, original)
+	}
+	if temps := configTempFiles(t, path); len(temps) != 0 {
+		t.Fatalf("temporary config files remain: %q", temps)
+	}
+}
+
 func configTempFiles(t *testing.T, path string) []string {
 	t.Helper()
 	temps, err := filepath.Glob(filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*"))
@@ -761,6 +802,109 @@ func TestSaveConfigPreservesUnknownProfileFieldsWithoutResurrectingRemovedProfil
 	}
 	if _, ok := newProfile["token"]; ok {
 		t.Fatalf("new profile inherited existing metadata: %s", devices["new"])
+	}
+}
+
+func TestSaveConfigDropsNestedProfileMetadataFromAmbiguousDevicesKeys(t *testing.T) {
+	cfg := Config{
+		DefaultHost:        "current-host",
+		Timeout:            4,
+		SpotifyRedirectURI: "http://127.0.0.1:19999/callback",
+		MaxVolume:          60,
+		DefaultDevice:      "office",
+		Devices: map[string]DeviceProfile{
+			"office": {Host: "current-office-host"},
+		},
+	}
+	want, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, '\n')
+
+	for _, tc := range []struct {
+		name    string
+		initial []byte
+		keys    []string
+	}{
+		{
+			name: "duplicate literal keys",
+			initial: []byte(`{
+  "devices": {
+    "office": {
+      "host": "stale-first-host",
+      "metadataFromFirst": "must-not-survive"
+    }
+  },
+  "devices": {
+    "office": {
+      "host": "stale-second-host",
+      "metadataFromSecond": "must-not-survive"
+    }
+  }
+}`),
+			keys: []string{"metadataFromFirst", "metadataFromSecond"},
+		},
+		{
+			name: "case-colliding keys",
+			initial: []byte(`{
+  "devices": {
+    "office": {
+      "host": "stale-lower-host",
+      "metadataFromLower": "must-not-survive"
+    }
+  },
+  "DEVICES": {
+    "office": {
+      "host": "stale-upper-host",
+      "metadataFromUpper": "must-not-survive"
+    }
+  }
+}`),
+			keys: []string{"metadataFromLower", "metadataFromUpper"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := t.TempDir() + "/config.json"
+			if err := os.WriteFile(path, tc.initial, 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			for save := 0; save < 10; save++ {
+				if _, err := SaveConfig(path, cfg); err != nil {
+					t.Fatalf("SaveConfig() on save %d: %v", save, err)
+				}
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("save %d produced non-canonical output:\ngot:  %s\nwant: %s", save, got, want)
+				}
+			}
+
+			saved, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(saved, &fields); err != nil {
+				t.Fatal(err)
+			}
+			var profiles map[string]json.RawMessage
+			if err := json.Unmarshal(fields["devices"], &profiles); err != nil {
+				t.Fatalf("devices = %s: %v", fields["devices"], err)
+			}
+			var office map[string]json.RawMessage
+			if err := json.Unmarshal(profiles["office"], &office); err != nil {
+				t.Fatalf("office profile = %s: %v", profiles["office"], err)
+			}
+			for _, key := range tc.keys {
+				if _, ok := office[key]; ok {
+					t.Fatalf("ambiguous devices metadata %q survived: %s", key, profiles["office"])
+				}
+			}
+		})
 	}
 }
 

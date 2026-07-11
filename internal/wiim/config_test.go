@@ -6,6 +6,8 @@ import (
 	"errors"
 	"math"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -298,5 +300,756 @@ func TestSaveConfigTreatsZeroTimeoutAsDefault(t *testing.T) {
 	cfg, err := LoadConfig(path)
 	if err != nil || cfg.Timeout != defaultTimeout {
 		t.Fatalf("LoadConfig() = %#v, %v; want timeout %v", cfg, err, defaultTimeout)
+	}
+}
+
+func TestValidateSpotifyRedirectURIIsIndependentOfEnvironment(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "https://example.com/not-loopback")
+	for _, tc := range []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{name: "valid", value: "http://127.0.0.1:19999/callback", valid: true},
+		{name: "wrong scheme", value: "https://127.0.0.1:19999/callback"},
+		{name: "wrong host", value: "http://localhost:19999/callback"},
+		{name: "missing path", value: "http://127.0.0.1:19999"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateSpotifyRedirectURI(tc.value)
+			if tc.valid && err != nil {
+				t.Fatalf("validateSpotifyRedirectURI(%q) error = %v", tc.value, err)
+			}
+			if !tc.valid && err == nil {
+				t.Fatalf("validateSpotifyRedirectURI(%q) succeeded", tc.value)
+			}
+		})
+	}
+}
+
+func TestResolveSpotifyRedirectURIPrecedenceAndValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		env       string
+		cfg       Config
+		want      string
+		wantError bool
+	}{
+		{name: "default", want: defaultSpotifyRedirectURI},
+		{name: "config", cfg: Config{SpotifyRedirectURI: "http://127.0.0.1:19999/config"}, want: "http://127.0.0.1:19999/config"},
+		{name: "environment overrides invalid config", env: "http://127.0.0.1:19999/env", cfg: Config{SpotifyRedirectURI: "https://example.com/invalid"}, want: "http://127.0.0.1:19999/env"},
+		{name: "invalid environment is rejected", env: "https://example.com/invalid", cfg: Config{SpotifyRedirectURI: "http://127.0.0.1:19999/config"}, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", tc.env)
+			got, err := ResolveSpotifyRedirectURI(tc.cfg)
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("ResolveSpotifyRedirectURI() succeeded")
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("ResolveSpotifyRedirectURI() = %q, %v; want %q, nil", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSaveConfigValidatesPersistedRedirectIndependentOfEnvironment(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "http://127.0.0.1:19999/env")
+	_, err := SaveConfig(t.TempDir()+"/config.json", Config{SpotifyRedirectURI: "https://example.com/invalid"})
+	if err == nil {
+		t.Fatal("SaveConfig() succeeded with invalid persisted redirect URI")
+	}
+	if _, ok := err.(UsageError); !ok {
+		t.Fatalf("SaveConfig() error type %T, want UsageError: %v", err, err)
+	}
+}
+
+func TestConfigSetValidatesRedirectIndependentOfEnvironment(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "http://127.0.0.1:19999/env")
+	path := t.TempDir() + "/config.json"
+	code, _, errText := runTest("--config", path, "config", "set", "spotifyRedirectURI", "https://example.com/invalid")
+	if code != 2 || !strings.Contains(errText, "spotifyRedirectURI must be a loopback http URL") {
+		t.Fatalf("config set: code %d err %q", code, errText)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("config set created config: %v", err)
+	}
+}
+
+func TestConfigSetRejectsInvalidPersistedRedirectDespiteValidEnvironment(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "http://127.0.0.1:19999/env")
+	path := t.TempDir() + "/config.json"
+	initial := []byte(`{"defaultHost":"old-host","spotifyRedirectURI":"https://example.com/invalid"}`)
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errText := runTest("--config", path, "config", "set", "defaultHost", "new-host")
+	if code != 2 || !strings.Contains(errText, "spotifyRedirectURI must be a loopback http URL") {
+		t.Fatalf("config set with invalid persisted redirect: code %d err %q", code, errText)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, initial) {
+		t.Fatalf("config set changed invalid config on error: got %q, want %q", got, initial)
+	}
+}
+
+func TestSaveConfigAcceptsValidPersistedRedirectDespiteInvalidEnvironment(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "https://example.com/invalid")
+	path := t.TempDir() + "/config.json"
+	want := "http://127.0.0.1:19999/config"
+	if _, err := SaveConfig(path, Config{SpotifyRedirectURI: want}); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	got, err := LoadConfig(path)
+	if err != nil || got.SpotifyRedirectURI != want {
+		t.Fatalf("LoadConfig() = %#v, %v; want redirect %q", got, err, want)
+	}
+}
+
+func TestResolveHostPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cliHost   string
+		cliDevice string
+		envHost   string
+		cfg       Config
+		want      string
+		wantError string
+	}{
+		{
+			name:    "cli host overrides every source including dangling default",
+			cliHost: "cli-host",
+			envHost: "env-host",
+			cfg:     Config{DefaultDevice: "missing", DefaultHost: "config-host"},
+			want:    "cli-host",
+		},
+		{
+			name:    "environment overrides every configured source including dangling default",
+			envHost: "env-host",
+			cfg:     Config{DefaultDevice: "missing", DefaultHost: "config-host"},
+			want:    "env-host",
+		},
+		{
+			name:      "explicit device",
+			cliDevice: "office",
+			cfg: Config{DefaultDevice: "living-room", DefaultHost: "config-host", Devices: map[string]DeviceProfile{
+				"office":      {Host: "office-host"},
+				"living-room": {Host: "living-host"},
+			}},
+			want: "office-host",
+		},
+		{
+			name: "configured default device",
+			cfg: Config{DefaultDevice: "office", DefaultHost: "config-host", Devices: map[string]DeviceProfile{
+				"office": {Host: "office-host"},
+			}},
+			want: "office-host",
+		},
+		{
+			name: "default host",
+			cfg:  Config{DefaultHost: "config-host"},
+			want: "config-host",
+		},
+		{
+			name:      "no host",
+			wantError: "--device",
+		},
+		{
+			name:      "explicit missing device does not fall back",
+			cliDevice: "missing",
+			cfg:       Config{DefaultHost: "config-host"},
+			wantError: "missing",
+		},
+		{
+			name:      "dangling configured default does not fall back",
+			cfg:       Config{DefaultDevice: "missing", DefaultHost: "config-host"},
+			wantError: "missing",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("WIIM_HOST", tc.envHost)
+			got, err := ResolveHost(tc.cliHost, tc.cliDevice, tc.cfg)
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("ResolveHost() error = %v, want substring %q", err, tc.wantError)
+				}
+				if _, ok := err.(UsageError); !ok {
+					t.Fatalf("error type %T, want UsageError", err)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("ResolveHost() = %q, %v; want %q, nil", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateDeviceNameRejectsPathTraversalNames(t *testing.T) {
+	for _, name := range []string{".", ".."} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateDeviceName(name); err == nil {
+				t.Fatal("ValidateDeviceName() succeeded, want UsageError")
+			} else if _, ok := err.(UsageError); !ok {
+				t.Fatalf("error type %T, want UsageError: %v", err, err)
+			}
+		})
+	}
+}
+
+func TestSaveConfigValidatesProfilesInNameOrder(t *testing.T) {
+	cfg := Config{Devices: map[string]DeviceProfile{
+		"z-profile": {Host: "https://z-invalid"},
+		"a-profile": {Host: "https://a-invalid"},
+	}}
+	_, err := SaveConfig(t.TempDir()+"/config.json", cfg)
+	if err == nil {
+		t.Fatal("SaveConfig() succeeded, want UsageError")
+	}
+	usageErr, ok := err.(UsageError)
+	if !ok {
+		t.Fatalf("error type %T, want UsageError: %v", err, err)
+	}
+	if !strings.Contains(usageErr.Msg, `device profile "a-profile"`) ||
+		!strings.Contains(usageErr.Msg, "host must be a hostname or IP address, not a URL") {
+		t.Fatalf("error message = %q, want sorted profile name and host validation meaning", usageErr.Msg)
+	}
+}
+
+func TestSaveConfigRejectsInvalidProfiles(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "invalid profile name", cfg: Config{Devices: map[string]DeviceProfile{"bad/name": {Host: "valid-host"}}}},
+		{name: "invalid profile host", cfg: Config{Devices: map[string]DeviceProfile{"valid": {Host: "https://bad"}}}},
+		{name: "invalid default host", cfg: Config{DefaultHost: "https://bad"}},
+		{name: "dangling default device", cfg: Config{DefaultDevice: "missing", Devices: map[string]DeviceProfile{"other": {Host: "other-host"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := SaveConfig(t.TempDir()+"/config.json", tc.cfg)
+			if err == nil {
+				t.Fatal("SaveConfig() succeeded, want UsageError")
+			}
+			if _, ok := err.(UsageError); !ok {
+				t.Fatalf("error type %T, want UsageError: %v", err, err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigOldJSONRemainsCompatible(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	if err := os.WriteFile(path, []byte(`{"defaultHost":"old-host","timeout":2,"spotifyRedirectURI":"http://127.0.0.1:19872/login","maxVolume":60}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.DefaultHost != "old-host" || cfg.Timeout != 2 || cfg.MaxVolume != 60 || cfg.DefaultDevice != "" || cfg.Devices != nil {
+		t.Fatalf("LoadConfig() = %#v, want old fields and no profile fields", cfg)
+	}
+}
+
+func TestSaveConfigAtomicallyReplacesExistingConfig(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "")
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"incomplete":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	want := Config{
+		DefaultHost: "new-host",
+		Timeout:     8,
+		MaxVolume:   60,
+		Devices: map[string]DeviceProfile{
+			"office": {Host: "office-host"},
+		},
+	}
+	if _, err := SaveConfig(path, want); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(data) || bytes.Contains(data, []byte(`"incomplete"`)) {
+		t.Fatalf("config data = %q, want complete valid JSON", data)
+	}
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if got.DefaultHost != want.DefaultHost || got.Timeout != want.Timeout || got.MaxVolume != want.MaxVolume || got.Devices["office"].Host != "office-host" {
+		t.Fatalf("LoadConfig() = %#v, want complete replacement", got)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("config mode = %o, want 0600", info.Mode().Perm())
+		}
+		dirInfo, err := os.Stat(filepath.Dir(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dirInfo.Mode().Perm() != 0755 {
+			t.Fatalf("config directory mode = %o, want existing 0755", dirInfo.Mode().Perm())
+		}
+	}
+	if temps := configTempFiles(t, path); len(temps) != 0 {
+		t.Fatalf("temporary config files remain: %q", temps)
+	}
+}
+
+func TestWriteFileAtomicRenameFailurePreservesTargetAndCleansUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	original := []byte("{\"complete\":\"old config\"}\n")
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	forcedErr := errors.New("forced rename failure")
+	oldRename := renameFile
+	oldPreserveOwnership := preserveOwnership
+	ownershipPreserved := false
+	preserveOwnership = func(targetPath, replacementPath string) error {
+		if targetPath != path || replacementPath == path {
+			t.Fatalf("preserveOwnership(%q, %q), want target and temporary replacement", targetPath, replacementPath)
+		}
+		ownershipPreserved = true
+		return nil
+	}
+	renameFile = func(string, string) error {
+		if !ownershipPreserved {
+			t.Fatal("rename called before ownership preservation")
+		}
+		return forcedErr
+	}
+	t.Cleanup(func() {
+		renameFile = oldRename
+		preserveOwnership = oldPreserveOwnership
+	})
+
+	err := writeFileAtomic(path, []byte("{\"complete\":\"new config\"}\n"))
+	if !errors.Is(err, forcedErr) {
+		t.Fatalf("writeFileAtomic() error = %v, want %v", err, forcedErr)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("config changed after rename failure: got %q, want %q", got, original)
+	}
+	if temps := configTempFiles(t, path); len(temps) != 0 {
+		t.Fatalf("temporary config files remain: %q", temps)
+	}
+}
+
+func TestWriteFileAtomicOwnershipFailurePreservesTargetAndCleansUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	original := []byte("{\"complete\":\"old config\"}\n")
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	forcedErr := errors.New("forced ownership failure")
+	oldPreserveOwnership := preserveOwnership
+	oldRename := renameFile
+	preserveOwnership = func(targetPath, replacementPath string) error {
+		if targetPath != path || replacementPath == path {
+			t.Fatalf("preserveOwnership(%q, %q), want target and temporary replacement", targetPath, replacementPath)
+		}
+		return forcedErr
+	}
+	renameFile = func(string, string) error {
+		t.Fatal("rename called after ownership preservation failure")
+		return nil
+	}
+	t.Cleanup(func() {
+		preserveOwnership = oldPreserveOwnership
+		renameFile = oldRename
+	})
+
+	err := writeFileAtomic(path, []byte("{\"complete\":\"new config\"}\n"))
+	if !errors.Is(err, forcedErr) {
+		t.Fatalf("writeFileAtomic() error = %v, want %v", err, forcedErr)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("config changed after ownership failure: got %q, want %q", got, original)
+	}
+	if temps := configTempFiles(t, path); len(temps) != 0 {
+		t.Fatalf("temporary config files remain: %q", temps)
+	}
+}
+
+func configTempFiles(t *testing.T, path string) []string {
+	t.Helper()
+	temps, err := filepath.Glob(filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*"))
+	if err != nil {
+		t.Fatalf("find temporary config files: %v", err)
+	}
+	return temps
+}
+
+func TestSaveLoadConfigProfileRoundTrip(t *testing.T) {
+	t.Setenv("WIIM_SPOTIFY_REDIRECT_URI", "")
+	want := Config{
+		DefaultHost:   "legacy-host",
+		DefaultDevice: "office",
+		Devices: map[string]DeviceProfile{
+			"office":   {Host: "office-host"},
+			"upstairs": {Host: "upstairs-host"},
+		},
+	}
+	path := t.TempDir() + "/config.json"
+	if _, err := SaveConfig(path, want); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if got.DefaultDevice != want.DefaultDevice || len(got.Devices) != len(want.Devices) {
+		t.Fatalf("LoadConfig() = %#v, want profiles %#v", got, want)
+	}
+	for name, profile := range want.Devices {
+		if got.Devices[name] != profile {
+			t.Fatalf("profile %q = %#v, want %#v", name, got.Devices[name], want.Devices[name])
+		}
+	}
+}
+
+func TestSaveConfigPreservesUnknownProfileFieldsWithoutResurrectingRemovedProfiles(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	initial := []byte(`{
+  "devices": {
+    "office": {
+      "HOST": "old-office-host",
+      "futureSetting": {"enabled": true},
+      "token": "keep-me"
+    },
+    "removed": {
+      "host": "removed-host",
+      "token": "must-not-return"
+    }
+  }
+}`)
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{Devices: map[string]DeviceProfile{
+		"office": {Host: "current-office-host"},
+		"new":    {Host: "new-host"},
+	}}
+	if _, err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("saved config is invalid JSON: %v", err)
+	}
+	var devices map[string]json.RawMessage
+	if err := json.Unmarshal(fields["devices"], &devices); err != nil {
+		t.Fatalf("devices = %s: %v", fields["devices"], err)
+	}
+	if _, ok := devices["removed"]; ok {
+		t.Fatalf("removed profile was resurrected: %s", devices["removed"])
+	}
+	var office map[string]json.RawMessage
+	if err := json.Unmarshal(devices["office"], &office); err != nil {
+		t.Fatalf("office profile = %s: %v", devices["office"], err)
+	}
+	if got, want := string(office["host"]), `"current-office-host"`; got != want {
+		t.Fatalf("office host = %s, want %s", got, want)
+	}
+	if _, ok := office["HOST"]; ok {
+		t.Fatalf("case-insensitive known host survived: %s", office["HOST"])
+	}
+	if got, want := string(office["token"]), `"keep-me"`; got != want {
+		t.Fatalf("office token = %s, want %s", got, want)
+	}
+	var future map[string]bool
+	if err := json.Unmarshal(office["futureSetting"], &future); err != nil || !future["enabled"] {
+		t.Fatalf("office futureSetting = %s, %v; want preserved object", office["futureSetting"], err)
+	}
+	var newProfile map[string]json.RawMessage
+	if err := json.Unmarshal(devices["new"], &newProfile); err != nil {
+		t.Fatalf("new profile = %s: %v", devices["new"], err)
+	}
+	if _, ok := newProfile["token"]; ok {
+		t.Fatalf("new profile inherited existing metadata: %s", devices["new"])
+	}
+}
+
+func TestSaveConfigDropsNestedProfileMetadataFromAmbiguousDevicesKeys(t *testing.T) {
+	cfg := Config{
+		DefaultHost:        "current-host",
+		Timeout:            4,
+		SpotifyRedirectURI: "http://127.0.0.1:19999/callback",
+		MaxVolume:          60,
+		DefaultDevice:      "office",
+		Devices: map[string]DeviceProfile{
+			"office": {Host: "current-office-host"},
+		},
+	}
+	want, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, '\n')
+
+	for _, tc := range []struct {
+		name    string
+		initial []byte
+		keys    []string
+	}{
+		{
+			name: "duplicate literal keys",
+			initial: []byte(`{
+  "devices": {
+    "office": {
+      "host": "stale-first-host",
+      "metadataFromFirst": "must-not-survive"
+    }
+  },
+  "devices": {
+    "office": {
+      "host": "stale-second-host",
+      "metadataFromSecond": "must-not-survive"
+    }
+  }
+}`),
+			keys: []string{"metadataFromFirst", "metadataFromSecond"},
+		},
+		{
+			name: "case-colliding keys",
+			initial: []byte(`{
+  "devices": {
+    "office": {
+      "host": "stale-lower-host",
+      "metadataFromLower": "must-not-survive"
+    }
+  },
+  "DEVICES": {
+    "office": {
+      "host": "stale-upper-host",
+      "metadataFromUpper": "must-not-survive"
+    }
+  }
+}`),
+			keys: []string{"metadataFromLower", "metadataFromUpper"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := t.TempDir() + "/config.json"
+			if err := os.WriteFile(path, tc.initial, 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			for save := 0; save < 10; save++ {
+				if _, err := SaveConfig(path, cfg); err != nil {
+					t.Fatalf("SaveConfig() on save %d: %v", save, err)
+				}
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("save %d produced non-canonical output:\ngot:  %s\nwant: %s", save, got, want)
+				}
+			}
+
+			saved, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(saved, &fields); err != nil {
+				t.Fatal(err)
+			}
+			var profiles map[string]json.RawMessage
+			if err := json.Unmarshal(fields["devices"], &profiles); err != nil {
+				t.Fatalf("devices = %s: %v", fields["devices"], err)
+			}
+			var office map[string]json.RawMessage
+			if err := json.Unmarshal(profiles["office"], &office); err != nil {
+				t.Fatalf("office profile = %s: %v", profiles["office"], err)
+			}
+			for _, key := range tc.keys {
+				if _, ok := office[key]; ok {
+					t.Fatalf("ambiguous devices metadata %q survived: %s", key, profiles["office"])
+				}
+			}
+		})
+	}
+}
+
+func TestSaveConfigTreatsKnownTopLevelKeysCaseInsensitively(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	initial := []byte(`{
+  "DEFAULTHOST": "stale-host",
+  "DEFAULTDEVICE": "stale-device",
+  "DEVICES": {"stale": {"host": "stale-host"}},
+  "TIMEOUT": 99,
+  "SPOTIFYREDIRECTURI": "http://127.0.0.1:19999/stale",
+  "MAXVOLUME": 99,
+  "futureSetting": true
+}`)
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{DefaultHost: "current-host", Timeout: 4, MaxVolume: 60}
+	if _, err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("saved config is invalid JSON: %v", err)
+	}
+	expectedKnownKeys := map[string]bool{
+		"defaultHost":        true,
+		"timeout":            true,
+		"spotifyRedirectURI": true,
+		"maxVolume":          true,
+	}
+	for key := range fields {
+		if isKnownConfigKey(key) && !expectedKnownKeys[key] {
+			t.Fatalf("stale or non-canonical known key %q survived", key)
+		}
+	}
+	if got, want := string(fields["defaultHost"]), `"current-host"`; got != want {
+		t.Fatalf("defaultHost = %s, want %s", got, want)
+	}
+	if got, want := string(fields["futureSetting"]), "true"; got != want {
+		t.Fatalf("futureSetting = %s, want %s", got, want)
+	}
+}
+
+func TestSaveConfigPreservesUnknownTopLevelFields(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	initial := []byte(`{
+  "defaultHost": {"malformed": true},
+  "defaultDevice": "stale",
+  "devices": "stale",
+  "futureSetting": {"enabled": true, "nested": [1, 2]}
+}`)
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{DefaultHost: "current-host", Timeout: 4, MaxVolume: 60}
+	if _, err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("saved config is invalid JSON: %v", err)
+	}
+	if string(fields["defaultHost"]) != `"current-host"` {
+		t.Fatalf("defaultHost = %s, want current config value", fields["defaultHost"])
+	}
+	if _, ok := fields["defaultDevice"]; ok {
+		t.Fatalf("stale defaultDevice survived: %s", data)
+	}
+	if _, ok := fields["devices"]; ok {
+		t.Fatalf("stale devices survived: %s", data)
+	}
+	var future map[string]any
+	if err := json.Unmarshal(fields["futureSetting"], &future); err != nil {
+		t.Fatalf("futureSetting = %s: %v", fields["futureSetting"], err)
+	}
+	if enabled, ok := future["enabled"].(bool); !ok || !enabled {
+		t.Fatalf("futureSetting = %#v, want preserved object", future)
+	}
+}
+
+func TestLoadConfigAllowsInvalidUnusedProfiles(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	if err := os.WriteFile(path, []byte(`{"devices":{"bad\u001bname":{"host":"bad host"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v, want unused profiles to remain loadable", err)
+	}
+	if host, err := ResolveHost("explicit-host", "", cfg); err != nil || host != "explicit-host" {
+		t.Fatalf("ResolveHost() = %q, %v; want explicit-host, nil", host, err)
+	}
+}
+
+func TestSaveConfigNewFileKeepsCurrentEncoding(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	cfg := Config{
+		DefaultHost:        "current-host",
+		Timeout:            4,
+		SpotifyRedirectURI: "http://127.0.0.1:19999/callback",
+		MaxVolume:          60,
+	}
+	want, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, '\n')
+	if _, err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("new config encoding changed:\ngot:  %s\nwant: %s", got, want)
+	}
+}
+
+func TestConfigSetInvalidExistingJSONStillUsesLoadConfigError(t *testing.T) {
+	path := t.TempDir() + "/config.json"
+	initial := []byte(`{"defaultHost":`)
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errText := runTest("--config", path, "config", "set", "defaultHost", "new-host")
+	if code != 2 || !strings.Contains(errText, "invalid config JSON") {
+		t.Fatalf("config set: code %d err %q", code, errText)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, initial) {
+		t.Fatalf("invalid config changed:\ngot:  %s\nwant: %s", got, initial)
 	}
 }

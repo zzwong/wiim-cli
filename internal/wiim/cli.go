@@ -16,6 +16,7 @@ import (
 
 type options struct {
 	host    string
+	device  string
 	timeout float64
 	config  string
 	asJSON  bool
@@ -143,6 +144,7 @@ func newApp(stdout, stderr io.Writer) *app {
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.PersistentFlags().StringVar(&a.opts.host, "host", "", "WiiM host or IP address; setup saves it as defaultHost")
+	root.PersistentFlags().StringVar(&a.opts.device, "device", "", "named WiiM device profile (overrides defaultDevice)")
 	a.timeoutFlag = &timeoutValue{destination: &a.opts.timeout}
 	root.PersistentFlags().Var(a.timeoutFlag, "timeout", "request timeout in seconds")
 	root.PersistentFlags().StringVar(&a.opts.config, "config", "", "path to config JSON")
@@ -152,20 +154,64 @@ func newApp(stdout, stderr io.Writer) *app {
 			return a.timeoutFlag.err
 		}
 		var valueRequired *pflag.ValueRequiredError
-		if errors.As(err, &valueRequired) && valueRequired.GetFlag() != nil &&
-			valueRequired.GetFlag().Name == "timeout" && valueRequired.GetSpecifiedName() == "timeout" {
-			return usagef("flag --timeout requires a value")
+		if errors.As(err, &valueRequired) && valueRequired.GetFlag() != nil {
+			switch valueRequired.GetFlag().Name {
+			case "timeout":
+				if valueRequired.GetSpecifiedName() == "timeout" {
+					return usagef("flag --timeout requires a value")
+				}
+			case "device":
+				if valueRequired.GetSpecifiedName() == "device" {
+					return usagef("flag --device requires a value")
+				}
+			case "host":
+				if valueRequired.GetSpecifiedName() == "host" {
+					return usagef("flag --host requires a value")
+				}
+			}
 		}
 		return err
 	})
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		if flag := root.PersistentFlags().Lookup("device"); flag != nil && flag.Changed && a.opts.device == "" {
+			return usagef("flag --device requires a value")
+		}
+		if flag := root.PersistentFlags().Lookup("device"); flag != nil && flag.Changed {
+			if target := deviceFlagRejectionTarget(cmd); target != "" {
+				return usagef("flag --device is not valid with %s", target)
+			}
+		}
+		return nil
+	}
 	a.root = root
 	a.addCommands()
 	return a
 }
 
+// deviceFlagRejectionTarget identifies command families that never select a
+// WiiM profile. Discovery retains its dedicated error in runDiscover so the
+// root command and the device-group alias remain identical.
+func deviceFlagRejectionTarget(cmd *cobra.Command) string {
+	for current := cmd; current != nil; current = current.Parent() {
+		if current.Name() == "discover" {
+			return ""
+		}
+	}
+	for current := cmd; current != nil; current = current.Parent() {
+		switch current.Name() {
+		case "setup", "version":
+			return current.Name()
+		case "config", "device", "spotify":
+			return current.Name()
+		}
+	}
+	return ""
+}
+
 func (a *app) addCommands() {
 	a.root.AddCommand(&cobra.Command{Use: "setup", Aliases: []string{"init"}, Short: "write initial config", Args: cobra.NoArgs, RunE: a.runSetup})
 	a.root.AddCommand(a.configCommand())
+	a.root.AddCommand(a.deviceCommand())
 
 	for _, spec := range []struct{ use, short string }{
 		{"status", "show device status"}, {"now", "show current playback metadata"}, {"mute", "mute playback"}, {"unmute", "unmute playback"},
@@ -211,6 +257,22 @@ func (a *app) runVolumeCommand(cmd *cobra.Command, args []string) error {
 		}
 		if parseFlags && strings.HasPrefix(arg, "--host=") {
 			a.opts.host = strings.TrimPrefix(arg, "--host=")
+			continue
+		}
+		if parseFlags && strings.HasPrefix(arg, "--device=") {
+			value := strings.TrimPrefix(arg, "--device=")
+			if value == "" {
+				return usagef("flag --device requires a value")
+			}
+			a.opts.device = value
+			continue
+		}
+		if parseFlags && arg == "--device" {
+			if i+1 >= len(args) || args[i+1] == "" || args[i+1] == "--" {
+				return usagef("flag --device requires a value")
+			}
+			i++
+			a.opts.device = args[i]
 			continue
 		}
 		if parseFlags && arg == "--host" {
@@ -285,8 +347,20 @@ func (a *app) configCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "config", Short: "show or update configuration"}
 	cmd.AddCommand(&cobra.Command{Use: "show", Short: "show effective config", Args: cobra.NoArgs, RunE: a.runConfigShow})
 	cmd.AddCommand(&cobra.Command{Use: "path", Short: "print config path", Args: cobra.NoArgs, RunE: a.runConfigPath})
-	cmd.AddCommand(&cobra.Command{Use: "set <key> <value>", Short: "set defaultHost, timeout, maxVolume, or spotifyRedirectURI", Args: cobra.ExactArgs(2), RunE: a.runConfigSet})
-	cmd.AddCommand(&cobra.Command{Use: "unset <key>", Short: "unset defaultHost or spotifyRedirectURI", Args: cobra.ExactArgs(1), RunE: a.runConfigUnset})
+	cmd.AddCommand(&cobra.Command{Use: "set <key> <value>", Short: "set defaultHost, defaultDevice, timeout, maxVolume, or spotifyRedirectURI", Args: cobra.ExactArgs(2), RunE: a.runConfigSet})
+	cmd.AddCommand(&cobra.Command{Use: "unset <key>", Short: "unset defaultHost, defaultDevice, timeout, maxVolume, or spotifyRedirectURI", Args: cobra.ExactArgs(1), RunE: a.runConfigUnset})
+	return cmd
+}
+
+func (a *app) deviceCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "device", Short: "manage named WiiM device profiles"}
+	cmd.AddCommand(&cobra.Command{Use: "list", Short: "list saved device profiles", Args: cobra.NoArgs, RunE: a.runDeviceList})
+	cmd.AddCommand(&cobra.Command{Use: "add <name> <host>", Short: "add a saved device profile", Args: cobra.ExactArgs(2), RunE: a.runDeviceAdd})
+	cmd.AddCommand(&cobra.Command{Use: "remove <name>", Short: "remove a saved device profile", Args: cobra.ExactArgs(1), RunE: a.runDeviceRemove})
+	cmd.AddCommand(&cobra.Command{Use: "use <name>", Short: "select the default device profile", Args: cobra.ExactArgs(1), RunE: a.runDeviceUse})
+	// Keep this wired directly to runDiscover so the device-group alias uses
+	// the same hostless discovery, timeout resolution, and formatting path.
+	cmd.AddCommand(&cobra.Command{Use: "discover", Short: "find devices on the local network", Args: cobra.NoArgs, RunE: a.runDiscover})
 	return cmd
 }
 
@@ -369,7 +443,7 @@ func (a *app) runDevice(args []string) error {
 	if err != nil {
 		return err
 	}
-	host, err := ResolveHost(a.opts.host, cfg)
+	host, err := ResolveHost(a.opts.host, a.opts.device, cfg)
 	if err != nil {
 		return err
 	}
@@ -427,13 +501,19 @@ func (a *app) runVersion(_ *cobra.Command, _ []string) error {
 }
 
 // runDiscover doesn't go through runDevice: it doesn't target a single known
-// host at all, so --host/config-file host resolution don't apply. It does
-// still resolve --timeout the same way every other command does (flag →
+// host at all, so explicit --host/--device flags are rejected and host
+// resolution from config does not apply. It does still resolve --timeout the
+// same way every other command does (flag →
 // config file's timeout → 3.0 default, with an explicit 0 rejected as a
 // usage error by resolveTimeout) — repurposed here as "how long to wait for
 // SSDP responses" rather than a per-request HTTP timeout, but resolved
 // consistently rather than silently ignoring a configured default.
 func (a *app) runDiscover(_ *cobra.Command, _ []string) error {
+	for _, name := range []string{"host", "device"} {
+		if flag := a.root.PersistentFlags().Lookup(name); flag != nil && flag.Changed {
+			return usagef("flag --%s is not valid with discover", name)
+		}
+	}
 	cfg, err := a.loadConfig()
 	if err != nil {
 		return err
@@ -488,6 +568,78 @@ func (a *app) runConfigShow(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
+func (a *app) runDeviceList(_ *cobra.Command, _ []string) error {
+	cfg, err := a.loadConfig()
+	if err != nil {
+		return err
+	}
+	out, err := FormatDeviceProfiles(cfg, a.opts.asJSON)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(a.stdout, out)
+	return nil
+}
+
+func (a *app) runDeviceAdd(_ *cobra.Command, args []string) error {
+	cfg, err := a.loadConfig()
+	if err != nil {
+		return err
+	}
+	if err := AddDeviceProfile(&cfg, args[0], args[1]); err != nil {
+		return err
+	}
+	if _, err := SaveConfig(a.opts.config, cfg); err != nil {
+		return err
+	}
+	return a.writeDeviceMutation(DeviceProfileView{Name: args[0], Host: args[1]}, fmt.Sprintf("Added device %q (%s)", args[0], args[1]))
+}
+
+func (a *app) runDeviceRemove(_ *cobra.Command, args []string) error {
+	cfg, err := a.loadConfig()
+	if err != nil {
+		return err
+	}
+	if err := RemoveDeviceProfile(&cfg, args[0]); err != nil {
+		return err
+	}
+	if _, err := SaveConfig(a.opts.config, cfg); err != nil {
+		return err
+	}
+	return a.writeDeviceMutation(struct {
+		Removed string `json:"removed"`
+	}{Removed: args[0]}, fmt.Sprintf("Removed device %q", args[0]))
+}
+
+func (a *app) runDeviceUse(_ *cobra.Command, args []string) error {
+	cfg, err := a.loadConfig()
+	if err != nil {
+		return err
+	}
+	if err := UseDeviceProfile(&cfg, args[0]); err != nil {
+		return err
+	}
+	if _, err := SaveConfig(a.opts.config, cfg); err != nil {
+		return err
+	}
+	return a.writeDeviceMutation(struct {
+		DefaultDevice string `json:"defaultDevice"`
+	}{DefaultDevice: args[0]}, fmt.Sprintf("Default device: %s", args[0]))
+}
+
+func (a *app) writeDeviceMutation(value any, human string) error {
+	if !a.opts.asJSON {
+		fmt.Fprintln(a.stdout, human)
+		return nil
+	}
+	out, err := jsonText(value)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(a.stdout, out)
+	return nil
+}
+
 func (a *app) runConfigUnset(_ *cobra.Command, args []string) error {
 	cfg, err := a.loadConfig()
 	if err != nil {
@@ -497,6 +649,8 @@ func (a *app) runConfigUnset(_ *cobra.Command, args []string) error {
 	switch key {
 	case "defaultHost", "host":
 		cfg.DefaultHost = ""
+	case "defaultDevice":
+		cfg.DefaultDevice = ""
 	case "spotifyRedirectURI":
 		cfg.SpotifyRedirectURI = ""
 	case "timeout":
@@ -522,10 +676,14 @@ func (a *app) runConfigSet(_ *cobra.Command, args []string) error {
 	key, value := args[0], args[1]
 	switch key {
 	case "defaultHost", "host":
-		if !hostPattern.MatchString(value) {
-			return usagef("host must be a hostname or IP address, not a URL")
+		if err := ValidateHost(value); err != nil {
+			return err
 		}
 		cfg.DefaultHost = value
+	case "defaultDevice":
+		if err := UseDeviceProfile(&cfg, value); err != nil {
+			return err
+		}
 	case "timeout":
 		v, err := parseTimeout(value)
 		if err != nil {
@@ -542,10 +700,10 @@ func (a *app) runConfigSet(_ *cobra.Command, args []string) error {
 			return err
 		}
 	case "spotifyRedirectURI":
-		cfg.SpotifyRedirectURI = value
-		if _, err := ResolveSpotifyRedirectURI(cfg); err != nil {
+		if err := validateSpotifyRedirectURI(value); err != nil {
 			return err
 		}
+		cfg.SpotifyRedirectURI = value
 	default:
 		return usagef("unknown config key %s", key)
 	}

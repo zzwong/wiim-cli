@@ -175,6 +175,7 @@ func TestDiscoverCommandHumanAndJSON(t *testing.T) {
 }
 
 func TestDiscoverCommandDoesNotRequireHost(t *testing.T) {
+	t.Setenv("WIIM_HOST", "http://ignored-host")
 	done := withFakeDiscovery(t, nil, nil)
 	defer done()
 
@@ -184,6 +185,94 @@ func TestDiscoverCommandDoesNotRequireHost(t *testing.T) {
 	}
 	if !strings.Contains(out, "No devices found") {
 		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+func TestDiscoverRejectsHostAndDeviceFlagsWithoutSideEffects(t *testing.T) {
+	t.Setenv("WIIM_HOST", "http://ignored-host")
+	path := t.TempDir() + "/config.json"
+	const config = `{"defaultHost":"legacy-host","timeout":2,"defaultDevice":"office","devices":{"office":{"host":"office-host"}}}`
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var ssdpCalls int
+	oldSearch := ssdpSearchFunc
+	ssdpSearchFunc = func(time.Duration) ([]string, error) {
+		ssdpCalls++
+		return nil, nil
+	}
+	defer func() { ssdpSearchFunc = oldSearch }()
+
+	commands := [][]string{{"discover"}, {"device", "discover"}}
+	flags := [][]string{{"--host", "cli-host"}, {"--device", "office"}}
+	for _, command := range commands {
+		for _, flag := range flags {
+			for _, beforeCommand := range []bool{true, false} {
+				for _, asJSON := range []bool{false, true} {
+					args := []string{"--config", path}
+					if beforeCommand {
+						args = append(args, flag...)
+						if asJSON {
+							args = append(args, "--json")
+						}
+						args = append(args, command...)
+					} else {
+						args = append(args, command...)
+						args = append(args, flag...)
+						if asJSON {
+							args = append(args, "--json")
+						}
+					}
+
+					var out, errb bytes.Buffer
+					runErr := Run(args, &out, &errb)
+					if runErr == nil || ExitCode(runErr) != 2 {
+						t.Fatalf("%q: error = %v, want UsageError", args, runErr)
+					}
+					if _, ok := runErr.(UsageError); !ok {
+						t.Fatalf("%q: error type %T, want UsageError", args, runErr)
+					}
+					wantErr := "wiim: flag " + flag[0] + " is not valid with discover"
+					if runErr.Error() != wantErr {
+						t.Fatalf("%q: error = %q, want %q", args, runErr, wantErr)
+					}
+					if !asJSON && errb.String() != runErr.Error()+"\n" {
+						t.Fatalf("%q: plain stderr = %q, want %q", args, errb.String(), runErr.Error()+"\n")
+					}
+					if asJSON {
+						var envelope struct {
+							Error struct {
+								Kind     string `json:"kind"`
+								Message  string `json:"message"`
+								ExitCode int    `json:"exitCode"`
+							} `json:"error"`
+						}
+						if err := json.Unmarshal(errb.Bytes(), &envelope); err != nil {
+							t.Fatalf("%q: JSON stderr = %q: %v", args, errb.String(), err)
+						}
+						wantMessage := strings.TrimPrefix(wantErr, "wiim: ")
+						if envelope.Error.Kind != "usage" || envelope.Error.Message != wantMessage || envelope.Error.ExitCode != 2 {
+							t.Fatalf("%q: JSON error = %#v, want usage/%q/2", args, envelope.Error, wantMessage)
+						}
+					}
+					after, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(after, before) {
+						t.Fatalf("%q mutated config on rejection:\n%s", args, after)
+					}
+				}
+			}
+		}
+	}
+	if ssdpCalls != 0 {
+		t.Fatalf("rejected discovery calls SSDP hook %d times", ssdpCalls)
 	}
 }
 
@@ -664,7 +753,7 @@ func TestResolveHostFromConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := ResolveHost("", cfg)
+	host, err := ResolveHost("", "", cfg)
 	if err != nil || host != "cfg-host" {
 		t.Fatalf("host %s err %v", host, err)
 	}

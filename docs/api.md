@@ -84,18 +84,36 @@ host (multiple network interfaces), the multicast request goes out whichever int
 default route picks; a device reachable only via a different, non-default interface won't be
 found even though it isn't technically cross-subnet.
 
-`--timeout` doubles as how long `discover` waits for SSDP replies (default `3.0`s, same
-resolution order as every other command: flag → config file's `timeout` → default). A very
-short `--timeout` can miss devices that delay their reply toward the end of the window the
-request itself advertises — the request's `MX` value is derived from `--timeout` (capped to
-`[1, 5]`) specifically so it never asks devices for a longer delay than the CLI is actually
-willing to wait out.
+`--timeout` doubles as how long `discover` waits for SSDP replies (default `3.0`s); only the
+timeout setting is resolved from the flag, config file's `timeout`, or default. Discovery does
+not resolve a target host. It rejects explicit `--host` and `--device` flags, and ignores ambient
+`WIIM_HOST` plus configured `defaultDevice`/`defaultHost`. A very short `--timeout` can miss
+devices that delay their reply toward the end of the window the request itself advertises — the
+request's `MX` value is derived from `--timeout` (capped to `[1, 5]`) specifically so it never
+asks devices for a longer delay than the CLI is actually willing to wait out.
+
+### CLI targeting and named profiles
+
+Target selection is CLI/config behavior, not part of the WiiM/Linkplay device API. For commands
+that target one device, host resolution precedence is exactly `--host` > `WIIM_HOST` > explicit `--device` > `defaultDevice` > `defaultHost`. A named profile is an entry in the local
+`devices` config map, with a `host`; `--device <name>` selects it for one invocation and
+`device use <name>` saves it as `defaultDevice`. `device list`, `device add`, `device remove`,
+and `device use` only read or mutate the local config file and make no device API calls.
+
+`wiim device discover` is an alias for `wiim discover`, not a device API command. Both forms
+perform the same hostless SSDP search, validate candidates with read-only status requests, and
+never write profiles or other config. To save a result, explicitly run `wiim device add
+<name> <host>` after discovery; there is no automatic discovery-to-config migration.
 
 ## Commands used by this CLI
 
 | CLI command | API command(s) | Notes |
 | --- | --- | --- |
-| `wiim discover` | SSDP `M-SEARCH`, then `getStatusEx` per candidate | Finds devices on the LAN; see "Discovery" above. |
+| `wiim discover` / `wiim device discover` | SSDP `M-SEARCH`, then `getStatusEx` per candidate | Hostless, read-only discovery alias pair; explicit `--host`/`--device` are rejected. See "Discovery" above. |
+| `wiim device list` | — | Lists named profiles from local config; no device API call. |
+| `wiim device add <name> <host>` | — | Adds a named profile to local config; no device API call. |
+| `wiim device remove <name>` | — | Removes a named profile from local config; no device API call. |
+| `wiim device use <name>` | — | Sets local `defaultDevice`; no device API call. |
 | `wiim status` | `getStatusEx`, `getPlayerStatus`, Cast `eureka_info` | Combines device/network/player state. Cast lookup is best effort. |
 | `wiim now` | `getPlayerStatus`, `getMetaInfo` | Metadata from `getMetaInfo` is preferred; player title/artist/album may be hex encoded. `unknow`/`Unknown` is treated as missing metadata. |
 | `wiim cast-now` | Cast protocol on TLS port 8009 | Best-effort Google Cast media-session metadata query. Works only when an active Cast media session is exposed. |
@@ -222,6 +240,7 @@ Spotify commands are separate from the WiiM HTTP API. They use Spotify's Web API
 
 ```bash
 wiim spotify credentials set
+wiim spotify credentials set-secret
 wiim spotify credentials import-clipboard id
 wiim spotify credentials import-clipboard secret
 wiim spotify credentials status

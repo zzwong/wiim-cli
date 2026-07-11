@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Named WiiM device profiles in local config, with `wiim device list`, `add`, `remove`, and
+  `use` commands plus one-shot `--device <name>` targeting.
+- `wiim device discover` as a discovery alias and documented discovery-to-config workflow;
+  discovery remains hostless and read-only.
+
+### Fixed
+
+- Reliability hardening for device/profile configuration, including validation, consistent
+  timeout handling, atomic config replacement, and preservation of the config directory.
+
 ## [0.2.0] - 2026-07-05
 
 ### Added

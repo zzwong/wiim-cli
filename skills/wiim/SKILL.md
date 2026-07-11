@@ -5,12 +5,14 @@ description: Use this skill when operating this repository's WiiM CLI or control
 
 # WiiM CLI Operator Guidance
 
-Known development device details should be configured in `~/.config/wiim-cli/config.json` with `wiim setup --host <wiim-host>` or temporarily overridden with `--host`. Do not assume a hardcoded host.
+Known development device details should be configured in `~/.config/wiim-cli/config.json` with `wiim setup --host <wiim-host>` or named with `wiim device add <name> <host>`. For targeted commands, host resolution precedence is exactly `--host` > `WIIM_HOST` > explicit `--device` > `defaultDevice` > `defaultHost`; `--host` and `--device` do not mutate config. Do not assume a hardcoded host.
 
-If no host is configured and none was given, run `wiim discover` (no `--host` needed) before
-asking the user for one — it finds Linkplay/WiiM devices on the LAN via SSDP in a few
-seconds. It's read-only and safe to run unprompted; an empty result just means nothing
-answered, not an error.
+If no host is configured and none was given, run `wiim discover` (or its `wiim device discover`
+alias; neither takes a target flag) before asking the user for one — it finds Linkplay/WiiM
+devices on the LAN via SSDP in a few seconds. Both discovery forms reject explicit `--host` and
+`--device` flags and ignore ambient `WIIM_HOST` plus configured `defaultDevice`/`defaultHost`.
+Discovery is read-only and safe to run unprompted; an empty result just means nothing answered,
+not an error.
 
 ## Safe first commands
 
@@ -19,11 +21,15 @@ Run read-only commands before mutating anything:
 ```bash
 wiim discover
 wiim --host <wiim-host> status
-wiim --host <wiim-host> now
-wiim --host <wiim-host> cast-now
-wiim --host <wiim-host> input
-wiim --host <wiim-host> volume
-wiim --host <wiim-host> preset list
+wiim --device <name> status          # use one saved profile for this invocation
+wiim status                          # use the configured precedence/default
+wiim --device <name> now
+wiim --device <name> cast-now
+wiim --device <name> input
+wiim --device <name> volume
+wiim --device <name> preset list
+wiim device list
+wiim device discover                  # same read-only path as wiim discover
 ```
 
 Use JSON for automation:
@@ -57,6 +63,7 @@ wiim --host <wiim-host> play-m3u <url>
 wiim --host <wiim-host> prompt-url <url>
 wiim --host <wiim-host> play-file <path>
 wiim --host <wiim-host> preset play <n>
+wiim cliamp handoff
 wiim spotify play <spotify-uri-or-url> [device-id]
 wiim spotify transfer <spotify-device-id>
 ```
@@ -93,13 +100,18 @@ wiim cliamp status
 wiim cliamp handoff
 ```
 
-`cliamp handoff` only works directly for HTTP/HTTPS URLs. Local files need `play-file`; Spotify needs Spotify Connect commands.
+`cliamp status` is read-only. `cliamp handoff` starts playback on the WiiM and is a
+mutating playback command that requires explicit user permission. It only works directly
+for HTTP/HTTPS URLs. Local files need `play-file`; Spotify needs Spotify Connect commands.
 
 ## Other commands
 
 Administrative commands that touch local config/keychain state, not device audio, so the
 playback safety rule above doesn't apply to them — but still confirm before clearing
-someone's stored credentials:
+someone's stored credentials. Device profile commands are local-only: `device list`, `device
+add`, `device remove`, and `device use` do not contact or change a WiiM. The full profile/discovery
+subcommand set is `device list`, `device add <name> <host>`, `device remove <name>`, `device use
+<name>`, and `device discover`.
 
 ```bash
 wiim version
@@ -107,6 +119,10 @@ wiim config show
 wiim config path
 wiim config set <key> <value>
 wiim config unset <key>
+wiim device list
+wiim device add <name> <host>
+wiim device remove <name>
+wiim device use <name>
 wiim spotify credentials set
 wiim spotify credentials set-secret
 wiim spotify credentials import-clipboard <id|secret>
@@ -119,13 +135,20 @@ wiim spotify logout
 - Connection refused on plain HTTP port 80 is expected for the WiiM API; use the CLI's HTTPS API path.
 - The Cast setup endpoint is on port `8008` and uses HTTP.
 - The WiiM HTTPS API may use a self-signed/invalid certificate; the CLI intentionally disables certificate verification for LAN device calls.
-- If no `--host` is supplied, check `WIIM_HOST` or `~/.config/wiim-cli/config.json`.
+- For targeted device commands, apply the exact precedence `--host` > `WIIM_HOST` > explicit
+  `--device` > `defaultDevice` > `defaultHost`. Inspect `wiim device list` and `wiim config show`;
+  `--device <name>` must name a configured profile. Existing `defaultHost` is a legacy fallback
+  and is not automatically migrated. Discovery is different: explicit `--host`/`--device` is
+  rejected, and `WIIM_HOST` plus configured host/profile selection is ignored.
 - Spotify redirect URI defaults to `http://127.0.0.1:19872/login`; override with `spotifyRedirectURI` or `WIIM_SPOTIFY_REDIRECT_URI`.
 - On Fedora/Linux, keychain access uses Secret Service; `secret-tool lookup` can print secrets, so avoid it except for debugging.
 
 ## Raw exploration
 
-Use `raw` to inspect or verify endpoints:
+> **Warning:** `raw` can send mutating API commands, not just inspect the device. Use it
+> only with known read-only endpoints unless the user explicitly authorizes the mutation.
+
+Use `raw` to inspect or verify known read-only endpoints:
 
 ```bash
 wiim --host <wiim-host> raw getStatusEx

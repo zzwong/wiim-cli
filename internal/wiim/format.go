@@ -292,6 +292,33 @@ func FormatDiscovered(devices []DiscoveredDevice, asJSON bool) (string, error) {
 	return strings.Join(blocks, "\n\n"), nil
 }
 
+// FormatDeviceProfiles formats saved device profiles as a sorted table or JSON array.
+func FormatDeviceProfiles(cfg Config, asJSON bool) (string, error) {
+	if err := ValidateDeviceProfiles(cfg); err != nil {
+		return "", err
+	}
+	profiles := ListDeviceProfiles(cfg)
+	if asJSON {
+		data, err := json.Marshal(profiles)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+	if len(profiles) == 0 {
+		return "No saved devices.", nil
+	}
+	lines := []string{"NAME\tHOST\tDEFAULT"}
+	for _, profile := range profiles {
+		marker := ""
+		if profile.Default {
+			marker = "*"
+		}
+		lines = append(lines, fmt.Sprintf("%s\t%s\t%s", profile.Name, profile.Host, marker))
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
 // FormatRaw formats an arbitrary value: maps and slices are pretty-printed as JSON;
 // scalars are converted with fmt.Sprint.
 func FormatRaw(value any) (string, error) {

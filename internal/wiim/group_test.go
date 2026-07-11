@@ -3,6 +3,7 @@ package wiim
 import (
 	"encoding/json"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -130,6 +131,96 @@ func TestNormalizeGroupMembersSingletonAndMixedScalars(t *testing.T) {
 	assertIntPtr(t, member.BatteryPercent, 88, "battery percent")
 	assertBoolPtr(t, member.BatteryCharging, true, "battery charging")
 	assertBoolPtr(t, member.Masked, true, "masked")
+}
+
+func TestNormalizeGroupMembersRejectsDuplicateNormalizedFields(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   any
+		context string
+	}{
+		{
+			name:    "top-level field",
+			value:   map[string]any{"slaves": 0, "SLAVES": 0},
+			context: "duplicate field \"slaves\"",
+		},
+		{
+			name: "member field",
+			value: map[string]any{"slaves": 1, "slave_list": []any{
+				map[string]any{"name": "Office", "NAME": "Kitchen"},
+			}},
+			context: "duplicate field \"name\"",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NormalizeGroupMembers(tc.value)
+			assertGroupRuntimeError(t, err, tc.context)
+		})
+	}
+}
+
+func TestNormalizeGroupMembersRejectsUnicodeCaseFoldDuplicate(t *testing.T) {
+	_, err := NormalizeGroupMembers(map[string]any{"slaves": 0, "ſlaves": 0})
+	assertGroupRuntimeError(t, err, `duplicate field "slaves"`)
+}
+
+func TestGroupIntPlatformBoundaries(t *testing.T) {
+	maxIntValue := maxInt()
+	maxText := strconv.FormatInt(int64(maxIntValue), 10)
+	for _, value := range []any{maxText, json.Number(maxText)} {
+		got, err := groupInt(value, "value")
+		if err != nil || got != maxIntValue {
+			t.Fatalf("groupInt(%T(%q)) = %d, %v; want %d, nil", value, value, got, err, maxIntValue)
+		}
+	}
+
+	var overflow string
+	if strconv.IntSize == 32 {
+		overflow = "2147483648"
+	} else {
+		overflow = "9223372036854775808"
+	}
+	for _, value := range []any{overflow, json.Number(overflow)} {
+		_, err := groupInt(value, "value")
+		assertGroupRuntimeError(t, err, "out of range")
+	}
+
+	if strconv.IntSize == 32 {
+		got, err := groupInt(float64(maxIntValue), "value")
+		if err != nil || got != maxIntValue {
+			t.Fatalf("groupInt(float64(MaxInt)) = %d, %v; want %d, nil", got, err, maxIntValue)
+		}
+	}
+}
+
+func TestNormalizeGroupMembersEnforcesMemberLimit(t *testing.T) {
+	for _, value := range []any{
+		map[string]any{"slaves": maxInt()},
+		map[string]any{"slaves": maxInt(), "slave_list": []any{map[string]any{}}},
+	} {
+		_, err := NormalizeGroupMembers(value)
+		assertGroupRuntimeError(t, err, "maximum group members")
+	}
+
+	overLimit := make([]any, maxGroupMembers+1)
+	for i := range overLimit {
+		overLimit[i] = map[string]any{}
+	}
+	_, err := NormalizeGroupMembers(map[string]any{"slaves": 0, "slave_list": overLimit})
+	assertGroupRuntimeError(t, err, "slave_list")
+
+	atLimit := make([]any, maxGroupMembers)
+	for i := range atLimit {
+		atLimit[i] = map[string]any{}
+	}
+	got, err := NormalizeGroupMembers(map[string]any{"slaves": maxGroupMembers, "slave_list": atLimit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Count != maxGroupMembers || len(got.Members) != maxGroupMembers {
+		t.Fatalf("group = %#v", got)
+	}
 }
 
 func TestGroupMemberJSONRetainsZeroValuedPointers(t *testing.T) {

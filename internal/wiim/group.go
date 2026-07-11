@@ -2,10 +2,12 @@ package wiim
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // GroupMember describes a device returned by Linkplay's multiroom:getSlaveList
@@ -32,6 +34,8 @@ type GroupMembers struct {
 	Members     []GroupMember `json:"members"`
 }
 
+const maxGroupMembers = 128
+
 // NormalizeGroupMembers normalizes current and legacy Linkplay multiroom
 // responses. Linkplay firmware has changed both key capitalization and scalar
 // types over time, so field names are matched case-insensitively and integer
@@ -42,8 +46,12 @@ func NormalizeGroupMembers(value any) (GroupMembers, error) {
 	if !ok {
 		return GroupMembers{}, runtimef("multiroom response must be an object")
 	}
+	response, err := normalizeGroupMap(response, "multiroom response")
+	if err != nil {
+		return GroupMembers{}, err
+	}
 
-	if version, present := groupField(response, "wmrm_version"); present {
+	if version, present := response["wmrm_version"]; present {
 		parsed, err := groupString(version, "wmrm_version")
 		if err != nil {
 			return GroupMembers{}, err
@@ -51,7 +59,7 @@ func NormalizeGroupMembers(value any) (GroupMembers, error) {
 		group.WMRMVersion = parsed
 	}
 
-	slavesValue, present := groupField(response, "slaves")
+	slavesValue, present := response["slaves"]
 	if !present {
 		return GroupMembers{}, runtimef("multiroom response missing slaves")
 	}
@@ -59,8 +67,11 @@ func NormalizeGroupMembers(value any) (GroupMembers, error) {
 	if err != nil {
 		return GroupMembers{}, err
 	}
+	if slaves > maxGroupMembers {
+		return GroupMembers{}, runtimef("slaves=%d exceeds maximum group members=%d", slaves, maxGroupMembers)
+	}
 
-	listValue, listPresent := groupField(response, "slave_list")
+	listValue, listPresent := response["slave_list"]
 	if !listPresent {
 		if slaves != 0 {
 			return GroupMembers{}, runtimef("multiroom response missing slave_list for slaves=%d", slaves)
@@ -72,6 +83,12 @@ func NormalizeGroupMembers(value any) (GroupMembers, error) {
 	if err != nil {
 		return GroupMembers{}, err
 	}
+	if len(entries) > maxGroupMembers {
+		return GroupMembers{}, runtimef("slave_list count=%d exceeds maximum group members=%d", len(entries), maxGroupMembers)
+	}
+	if slaves != len(entries) {
+		return GroupMembers{}, runtimef("slaves=%d does not match slave_list count=%d", slaves, len(entries))
+	}
 	group.Members = make([]GroupMember, 0, len(entries))
 	for index, entry := range entries {
 		member, err := normalizeGroupMember(entry, index)
@@ -81,9 +98,6 @@ func NormalizeGroupMembers(value any) (GroupMembers, error) {
 		group.Members = append(group.Members, member)
 	}
 	group.Count = len(group.Members)
-	if slaves != group.Count {
-		return GroupMembers{}, runtimef("slaves=%d does not match slave_list count=%d", slaves, group.Count)
-	}
 	return group, nil
 }
 
@@ -104,6 +118,10 @@ func normalizeGroupMember(value any, index int) (GroupMember, error) {
 		return GroupMember{}, runtimef("slave_list[%d] must be an object", index)
 	}
 	prefix := fmt.Sprintf("slave_list[%d]", index)
+	memberMap, err := normalizeGroupMap(memberMap, prefix)
+	if err != nil {
+		return GroupMember{}, err
+	}
 	member := GroupMember{}
 
 	for _, field := range []struct {
@@ -116,7 +134,7 @@ func normalizeGroupMember(value any, index int) (GroupMember, error) {
 		{"version", func(v string) { member.Version = v }},
 		{"type", func(v string) { member.Type = v }},
 	} {
-		if value, present := groupField(memberMap, field.key); present {
+		if value, present := memberMap[field.key]; present {
 			parsed, err := groupString(value, prefix+"."+field.key)
 			if err != nil {
 				return GroupMember{}, err
@@ -133,7 +151,7 @@ func normalizeGroupMember(value any, index int) (GroupMember, error) {
 		{"volume", func(v *int) { member.Volume = v }},
 		{"battery_percent", func(v *int) { member.BatteryPercent = v }},
 	} {
-		if value, present := groupField(memberMap, field.key); present {
+		if value, present := memberMap[field.key]; present {
 			parsed, err := groupInt(value, prefix+"."+field.key)
 			if err != nil {
 				return GroupMember{}, err
@@ -150,7 +168,7 @@ func normalizeGroupMember(value any, index int) (GroupMember, error) {
 		{"battery_charging", func(v *bool) { member.BatteryCharging = v }},
 		{"mask", func(v *bool) { member.Masked = v }},
 	} {
-		if value, present := groupField(memberMap, field.key); present {
+		if value, present := memberMap[field.key]; present {
 			parsed, err := groupBool(value, prefix+"."+field.key)
 			if err != nil {
 				return GroupMember{}, err
@@ -161,19 +179,32 @@ func normalizeGroupMember(value any, index int) (GroupMember, error) {
 	return member, nil
 }
 
-// groupField finds a map field without treating Linkplay's inconsistent key
-// capitalization as a protocol difference. An exact key wins if both forms
-// happen to be supplied.
-func groupField(m map[string]any, name string) (any, bool) {
-	if value, ok := m[name]; ok {
-		return value, true
-	}
-	for key, value := range m {
-		if strings.EqualFold(key, name) {
-			return value, true
+// lowerCaseFold returns a lowercase canonical representative for each
+// Unicode simple-fold equivalence class.
+func lowerCaseFold(value string) string {
+	return strings.Map(func(r rune) rune {
+		canonical := unicode.ToLower(r)
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			if lower := unicode.ToLower(folded); lower < canonical {
+				canonical = lower
+			}
 		}
+		return canonical
+	}, value)
+}
+
+// normalizeGroupMap lowercases a Linkplay object once so all later field
+// lookups are deterministic. Case variants of the same field are ambiguous.
+func normalizeGroupMap(m map[string]any, context string) (map[string]any, error) {
+	normalized := make(map[string]any, len(m))
+	for key, value := range m {
+		lowerKey := lowerCaseFold(key)
+		if _, exists := normalized[lowerKey]; exists {
+			return nil, runtimef("%s has duplicate field %q", context, lowerKey)
+		}
+		normalized[lowerKey] = value
 	}
-	return nil, false
+	return normalized, nil
 }
 
 func groupString(value any, field string) (string, error) {
@@ -224,22 +255,29 @@ func groupFloatInt(value float64, field string) (int, error) {
 	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || math.Trunc(value) != value {
 		return 0, runtimef("%s must be a non-negative integer", field)
 	}
-	if value >= float64(maxInt()) {
+	if value > float64(maxInt()) || (strconv.IntSize == 64 && value >= float64(maxInt())) {
 		return 0, runtimef("%s is out of range", field)
 	}
-	return int(value), nil
+	integer := int(value)
+	if float64(integer) != value {
+		return 0, runtimef("%s is out of range", field)
+	}
+	return integer, nil
 }
 
 func groupDecimalInt(value, field string) (int, error) {
-	integer, err := strconv.ParseInt(value, 10, 64)
+	integer, err := strconv.ParseInt(value, 10, strconv.IntSize)
 	if err != nil {
+		if strings.HasPrefix(value, "-") {
+			return 0, runtimef("%s must be a non-negative integer", field)
+		}
+		if errors.Is(err, strconv.ErrRange) {
+			return 0, runtimef("%s is out of range", field)
+		}
 		return 0, runtimef("%s must be a non-negative integer", field)
 	}
 	if integer < 0 {
 		return 0, runtimef("%s must be a non-negative integer", field)
-	}
-	if integer > int64(maxInt()) {
-		return 0, runtimef("%s is out of range", field)
 	}
 	return int(integer), nil
 }

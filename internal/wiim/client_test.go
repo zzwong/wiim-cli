@@ -1,6 +1,7 @@
 package wiim
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -39,6 +40,42 @@ func TestCommandBuildsHTTPSURLAndDecodesJSON(t *testing.T) {
 	m := value.(map[string]any)
 	if m["ok"] != "yes" {
 		t.Fatalf("value %#v", value)
+	}
+}
+
+func TestCommandUsesJSONNumbersAndRejectsTrailingGarbage(t *testing.T) {
+	responses := []string{
+		`{"large":9007199254740993,"vol":38}`,
+		" \n{\"ok\":true} trailing\t",
+	}
+	client := NewClient("host", 3)
+	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		body := responses[0]
+		responses = responses[1:]
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+
+	value, err := client.Command("first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("value = %T, want object", value)
+	}
+	if number, ok := decoded["large"].(json.Number); !ok || number != "9007199254740993" {
+		t.Fatalf("large = %#v (%T), want json.Number", decoded["large"], decoded["large"])
+	}
+	if volume := intPtr(decoded["vol"]); volume == nil || *volume != 38 {
+		t.Fatalf("volume = %#v, want 38", volume)
+	}
+
+	value, err = client.Command("second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != `{"ok":true} trailing` {
+		t.Fatalf("value = %#v, want trimmed text fallback", value)
 	}
 }
 

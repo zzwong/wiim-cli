@@ -2,6 +2,8 @@ package wiim
 
 import (
 	"encoding/json"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -19,6 +21,75 @@ func TestNormalizeStatusCombinesSources(t *testing.T) {
 	}
 	if status.Muted == nil || *status.Muted {
 		t.Fatalf("muted %#v", status.Muted)
+	}
+}
+
+func TestNormalizeStatusAcceptsJSONNumber(t *testing.T) {
+	status := NormalizeStatus("192.0.2.10", nil, map[string]any{"vol": json.Number("38")}, nil)
+	if status.Volume == nil || *status.Volume != 38 {
+		t.Fatalf("volume %#v", status.Volume)
+	}
+}
+
+func TestIntPtrNumericConversions(t *testing.T) {
+	maxIntValue := int(^uint(0) >> 1)
+	maxText := strconv.Itoa(maxIntValue)
+	valid := []struct {
+		name  string
+		value any
+		want  int
+	}{
+		{"numeric string", "38", 38},
+		{"json number", json.Number("38"), 38},
+		{"float32", float32(38), 38},
+		{"float64", float64(38), 38},
+		{"maximum numeric string", maxText, maxIntValue},
+		{"maximum json number", json.Number(maxText), maxIntValue},
+	}
+	if strconv.IntSize == 32 {
+		valid = append(valid, struct {
+			name  string
+			value any
+			want  int
+		}{"maximum float64", float64(maxIntValue), maxIntValue})
+	}
+	for _, tc := range valid {
+		t.Run(tc.name, func(t *testing.T) {
+			got := intPtr(tc.value)
+			if got == nil || *got != tc.want {
+				t.Fatalf("intPtr(%T(%v)) = %v, want %d", tc.value, tc.value, got, tc.want)
+			}
+		})
+	}
+
+	var overflow string
+	if strconv.IntSize == 32 {
+		overflow = "2147483648"
+	} else {
+		overflow = "9223372036854775808"
+	}
+	invalid := []any{
+		nil,
+		true,
+		struct{}{},
+		"38.0",
+		json.Number("38.0"),
+		overflow,
+		json.Number(overflow),
+		float64(38.5),
+		math.NaN(),
+		math.Inf(1),
+		math.Inf(-1),
+	}
+	if strconv.IntSize == 32 {
+		invalid = append(invalid, float64(maxIntValue)+1)
+	} else {
+		invalid = append(invalid, float64(maxIntValue))
+	}
+	for _, value := range invalid {
+		if got := intPtr(value); got != nil {
+			t.Errorf("intPtr(%T(%v)) = %d, want nil", value, value, *got)
+		}
 	}
 }
 

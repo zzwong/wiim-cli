@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -212,9 +213,14 @@ func (c *Client) request(rawURL string) (any, error) {
 	if text == "" {
 		return "", nil
 	}
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
 	var value any
-	if err := json.Unmarshal([]byte(text), &value); err == nil {
-		return value, nil
+	if err := decoder.Decode(&value); err == nil {
+		var extra any
+		if err := decoder.Decode(&extra); err == io.EOF {
+			return value, nil
+		}
 	}
 	return text, nil
 }

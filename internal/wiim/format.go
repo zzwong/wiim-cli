@@ -3,6 +3,7 @@ package wiim
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -342,15 +343,45 @@ func intPtr(value any) *int {
 	if value == nil {
 		return nil
 	}
-	if f, ok := value.(float64); ok {
-		i := int(f)
-		return &i
+	switch value := value.(type) {
+	case json.Number:
+		return decimalIntPtr(value.String())
+	case string:
+		return decimalIntPtr(value)
+	case float32:
+		return floatIntPtr(float64(value))
+	case float64:
+		return floatIntPtr(value)
+	default:
+		return decimalIntPtr(stringValue(value))
 	}
-	i, err := strconv.Atoi(stringValue(value))
+}
+
+func decimalIntPtr(value string) *int {
+	i, err := strconv.ParseInt(value, 10, strconv.IntSize)
 	if err != nil {
 		return nil
 	}
-	return &i
+	result := int(i)
+	return &result
+}
+
+func floatIntPtr(value float64) *int {
+	if math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value {
+		return nil
+	}
+	if strconv.IntSize == 32 {
+		if value < -1<<31 || value > 1<<31-1 {
+			return nil
+		}
+	} else if value < -1<<63 || value >= 1<<63 {
+		return nil
+	}
+	result := int(value)
+	if float64(result) != value {
+		return nil
+	}
+	return &result
 }
 
 func bool01(value any) *bool {

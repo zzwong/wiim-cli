@@ -1,6 +1,7 @@
 package wiim
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -946,6 +947,12 @@ func validatedReportedVolume(player map[string]any) (int, error) {
 			return 0, runtimef("device did not report a valid current volume")
 		}
 		volume = parsed
+	case json.Number:
+		parsed, err := strconv.ParseInt(value.String(), 10, strconv.IntSize)
+		if err != nil {
+			return 0, runtimef("device did not report a valid current volume")
+		}
+		volume = int(parsed)
 	case int:
 		volume = value
 	case int8:

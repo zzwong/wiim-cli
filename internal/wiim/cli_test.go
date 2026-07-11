@@ -587,6 +587,17 @@ func TestVolumeAllowsSignedRelativeValues(t *testing.T) {
 	}
 }
 
+func TestRelativeVolumeAcceptsJSONNumberReportedByClient(t *testing.T) {
+	fd, done := withFake(t)
+	defer done()
+	fd.playerStatus = map[string]any{"vol": json.Number("38")}
+
+	code, out, errText := runTest("--host", "1.2.3.4", "volume", "+5")
+	if code != 0 || !strings.Contains(out, "Volume increased by 5") || len(fd.setVolumeValues) != 1 || fd.setVolumeValues[0] != 43 {
+		t.Fatalf("code %d out %q err %q set=%v", code, out, errText, fd.setVolumeValues)
+	}
+}
+
 func TestVolumeGlobalFlagsBeforeAndAfterCommand(t *testing.T) {
 	t.Setenv("WIIM_HOST", "")
 	fd, done := withFake(t)

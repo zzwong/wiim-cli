@@ -3,8 +3,11 @@ package wiim
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -92,6 +95,65 @@ func TestDispatchGroupStatusUsesOnlyStatusExThenOneMemberCommand(t *testing.T) {
 	}
 	if got, want := strings.Join(fd.readCalls, ","), "StatusEx,Command:multiroom:getSlaveList"; got != want || fd.statusExCalls != 1 || fd.commandCalls != 1 {
 		t.Fatalf("JSON calls = %#v, status count = %d, command count = %d; want [%s], 1, 1", fd.readCalls, fd.statusExCalls, fd.commandCalls, want)
+	}
+}
+
+func TestDispatchGroupRejectsDuplicateDeviceJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		args               []string
+		statusResponse     string
+		memberResponse     string
+		wantStatusRequests int
+		wantMemberRequests int
+	}{
+		{
+			name:               "duplicate getSlaveList slaves",
+			args:               []string{"members"},
+			memberResponse:     `{"slaves":0,"slaves":1,"slave_list":[]}`,
+			wantMemberRequests: 1,
+		},
+		{
+			name:               "duplicate getStatusEx group",
+			args:               []string{"status"},
+			statusResponse:     `{"group":0,"group":1}`,
+			wantStatusRequests: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var statusRequests, memberRequests int
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				switch r.URL.Query().Get("command") {
+				case "getStatusEx":
+					statusRequests++
+					_, _ = w.Write([]byte(tc.statusResponse))
+				case "multiroom:getSlaveList":
+					memberRequests++
+					_, _ = w.Write([]byte(tc.memberResponse))
+				default:
+					http.Error(w, "unexpected command", http.StatusBadRequest)
+				}
+				mu.Unlock()
+			}))
+			defer server.Close()
+
+			client := NewClient(strings.TrimPrefix(server.URL, "https://"), 3)
+			output, err := dispatchGroup(tc.args, options{}, "speaker.local", client)
+			if _, ok := err.(RuntimeError); !ok {
+				t.Fatalf("error type = %T, want RuntimeError: %v", err, err)
+			}
+			if output != "" {
+				t.Fatalf("output = %q, want no partial formatted output", output)
+			}
+			mu.Lock()
+			gotStatusRequests, gotMemberRequests := statusRequests, memberRequests
+			mu.Unlock()
+			if gotStatusRequests != tc.wantStatusRequests || gotMemberRequests != tc.wantMemberRequests {
+				t.Fatalf("requests: status=%d members=%d, want status=%d members=%d", gotStatusRequests, gotMemberRequests, tc.wantStatusRequests, tc.wantMemberRequests)
+			}
+		})
 	}
 }
 

@@ -79,6 +79,69 @@ func TestCommandUsesJSONNumbersAndRejectsTrailingGarbage(t *testing.T) {
 	}
 }
 
+func TestCommandRejectsDuplicateJSONObjectKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "top level", body: `{"slaves":0,"slaves":1,"slave_list":[]}`},
+		{name: "nested member", body: `{"slaves":1,"slave_list":[{"name":"Kitchen","name":"Office"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClient("host", 3)
+			client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header)}, nil
+			})}
+
+			value, err := client.Command("getStatusEx")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if value != tc.body {
+				t.Fatalf("value = %#v, want plain-text fallback %q", value, tc.body)
+			}
+		})
+	}
+}
+
+func TestCommandDecodesUniqueNestedJSON(t *testing.T) {
+	const body = `{"slaves":1,"slave_list":[{"name":"Kitchen","details":{"volume":9007199254740993}}],"active":true,"unset":null}`
+	client := NewClient("host", 3)
+	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+
+	value, err := client.Command("multiroom:getSlaveList")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("value = %T, want object", value)
+	}
+	if response["active"] != true {
+		t.Fatalf("active = %#v, want true", response["active"])
+	}
+	if unset, exists := response["unset"]; !exists || unset != nil {
+		t.Fatalf("unset = %#v, exists = %t; want present null", unset, exists)
+	}
+	members, ok := response["slave_list"].([]any)
+	if !ok || len(members) != 1 {
+		t.Fatalf("slave_list = %#v, want one-element array", response["slave_list"])
+	}
+	member, ok := members[0].(map[string]any)
+	if !ok || member["name"] != "Kitchen" {
+		t.Fatalf("member = %#v", members[0])
+	}
+	details, ok := member["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("details = %#v, want object", member["details"])
+	}
+	if number, ok := details["volume"].(json.Number); !ok || number != "9007199254740993" {
+		t.Fatalf("volume = %#v (%T), want json.Number", details["volume"], details["volume"])
+	}
+}
+
 func TestPlaybackURLCommands(t *testing.T) {
 	var seen []string
 	client := NewClient("host", 3)

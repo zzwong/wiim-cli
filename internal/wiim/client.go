@@ -215,14 +215,78 @@ func (c *Client) request(rawURL string) (any, error) {
 	}
 	decoder := json.NewDecoder(strings.NewReader(text))
 	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err == nil {
-		var extra any
-		if err := decoder.Decode(&extra); err == io.EOF {
+	if value, err := decodeJSONValue(decoder); err == nil {
+		if _, err := decoder.Token(); err == io.EOF {
 			return value, nil
 		}
 	}
 	return text, nil
+}
+
+// decodeJSONValue decodes one JSON value without allowing duplicate object
+// keys to overwrite a previously decoded value. Decoder.Token honors
+// UseNumber, so all JSON numbers retain their original representation.
+func decodeJSONValue(decoder *json.Decoder) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	return decodeJSONToken(decoder, token)
+}
+
+func decodeJSONToken(decoder *json.Decoder, token json.Token) (any, error) {
+	switch token := token.(type) {
+	case json.Delim:
+		switch token {
+		case '{':
+			object := make(map[string]any)
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return nil, err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return nil, fmt.Errorf("JSON object key is not a string")
+				}
+				if _, exists := object[key]; exists {
+					return nil, fmt.Errorf("duplicate JSON object key %q", key)
+				}
+				value, err := decodeJSONValue(decoder)
+				if err != nil {
+					return nil, err
+				}
+				object[key] = value
+			}
+			if end, err := decoder.Token(); err != nil {
+				return nil, err
+			} else if end != json.Delim('}') {
+				return nil, fmt.Errorf("JSON object has unexpected closing token %v", end)
+			}
+			return object, nil
+		case '[':
+			array := make([]any, 0)
+			for decoder.More() {
+				value, err := decodeJSONValue(decoder)
+				if err != nil {
+					return nil, err
+				}
+				array = append(array, value)
+			}
+			if end, err := decoder.Token(); err != nil {
+				return nil, err
+			} else if end != json.Delim(']') {
+				return nil, fmt.Errorf("JSON array has unexpected closing token %v", end)
+			}
+			return array, nil
+		default:
+			return nil, fmt.Errorf("unexpected JSON delimiter %q", token)
+		}
+	case string, bool, nil, json.Number:
+		return token, nil
+	default:
+		return nil, fmt.Errorf("unexpected JSON token %v", token)
+	}
 }
 
 func responseSnippet(text string) string {

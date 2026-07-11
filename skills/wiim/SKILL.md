@@ -28,9 +28,13 @@ wiim --device <name> cast-now
 wiim --device <name> input
 wiim --device <name> volume
 wiim --device <name> preset list
+wiim --device <name> group status
+wiim --device <name> group members
 wiim device list
 wiim device discover                  # same read-only path as wiim discover
 ```
+
+`group status` and `group members` are read-only and safe to run; they inspect the selected device's multiroom group without changing playback or group membership.
 
 Use JSON for automation:
 

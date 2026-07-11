@@ -14,8 +14,17 @@ import (
 
 type fakeDevice struct {
 	calls             []string
+	readCalls         []string
 	host              string
 	timeout           float64
+	statusEx          map[string]any
+	statusExErr       error
+	commandValues     map[string]any
+	commandErr        error
+	castInfoCalls     int
+	statusExCalls     int
+	metaInfoCalls     int
+	commandCalls      int
 	playerStatus      map[string]any
 	playerStatusCalls int
 	setVolumeValues   []int
@@ -24,13 +33,24 @@ type fakeDevice struct {
 }
 
 func (f *fakeDevice) CastInfo() (map[string]any, error) {
+	f.castInfoCalls++
+	f.readCalls = append(f.readCalls, "CastInfo")
 	return map[string]any{"name": "WiiM Ultra"}, nil
 }
 func (f *fakeDevice) StatusEx() (map[string]any, error) {
+	f.statusExCalls++
+	f.readCalls = append(f.readCalls, "StatusEx")
+	if f.statusExErr != nil {
+		return nil, f.statusExErr
+	}
+	if f.statusEx != nil {
+		return f.statusEx, nil
+	}
 	return map[string]any{"project": "WiiM_Ultra", "firmware": "fw", "internet": "1"}, nil
 }
 func (f *fakeDevice) PlayerStatus() (map[string]any, error) {
 	f.playerStatusCalls++
+	f.readCalls = append(f.readCalls, "PlayerStatus")
 	if f.playerStatus != nil {
 		return f.playerStatus, nil
 	}
@@ -41,10 +61,20 @@ func (f *fakeDevice) PlayerStatus() (map[string]any, error) {
 	return map[string]any{"status": "stop", "vol": f.volume, "mute": "0", "mode": "49"}, nil
 }
 func (f *fakeDevice) MetaInfo() map[string]any {
+	f.metaInfoCalls++
+	f.readCalls = append(f.readCalls, "MetaInfo")
 	return map[string]any{"metaData": map[string]any{"title": "Song"}}
 }
 func (f *fakeDevice) Command(c string) (any, error) {
+	f.commandCalls++
+	f.readCalls = append(f.readCalls, "Command:"+c)
 	f.calls = append(f.calls, "raw:"+c)
+	if f.commandErr != nil {
+		return nil, f.commandErr
+	}
+	if value, ok := f.commandValues[c]; ok {
+		return value, nil
+	}
 	return map[string]any{"command": c}, nil
 }
 func (f *fakeDevice) SetVolume(v int) error {

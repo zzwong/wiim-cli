@@ -235,6 +235,7 @@ func (a *app) addCommands() {
 	a.root.AddCommand(&cobra.Command{Use: "raw <command>", Short: "send a raw WiiM API command", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error { return a.runDevice([]string{"raw", args[0]}) }})
 	a.root.AddCommand(&cobra.Command{Use: "discover", Short: "find Linkplay/WiiM devices on the local network via SSDP", Args: cobra.NoArgs, RunE: a.runDiscover})
 	a.root.AddCommand(a.presetCommand())
+	a.root.AddCommand(a.groupCommand())
 	a.root.AddCommand(a.cliampCommand())
 	a.root.AddCommand(a.spotifyCommand())
 	a.root.AddCommand(&cobra.Command{Use: "version", Short: "print version", Args: cobra.NoArgs, RunE: a.runVersion})
@@ -370,6 +371,24 @@ func (a *app) presetCommand() *cobra.Command {
 	cmd.AddCommand(&cobra.Command{Use: "list", Short: "list presets", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error { return a.runDevice([]string{"preset", "list"}) }})
 	cmd.AddCommand(&cobra.Command{Use: "play <number> [index]", Short: "play a preset", Args: cobra.RangeArgs(1, 2), RunE: func(_ *cobra.Command, args []string) error {
 		return a.runDevice(append([]string{"preset", "play"}, args...))
+	}})
+	return cmd
+}
+
+func (a *app) groupCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "group",
+		Short: "inspect read-only multiroom group information",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return usagef("group requires subcommand: status or members")
+		},
+	}
+	cmd.AddCommand(&cobra.Command{Use: "status", Short: "show read-only multiroom group status", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
+		return a.runDevice([]string{"group", "status"})
+	}})
+	cmd.AddCommand(&cobra.Command{Use: "members", Short: "show read-only multiroom group members", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
+		return a.runDevice([]string{"group", "members"})
 	}})
 	return cmd
 }
@@ -811,6 +830,8 @@ func dispatch(args []string, opts options, host string, client device, cfg Confi
 		return fmt.Sprintf("Seeked to %d seconds", seconds), nil
 	case "preset":
 		return dispatchPreset(args[1:], opts, client)
+	case "group":
+		return dispatchGroup(args[1:], opts, host, client)
 	case "cliamp":
 		return dispatchCliamp(args[1:], opts, client)
 	case "play", "pause", "stop", "next", "prev":

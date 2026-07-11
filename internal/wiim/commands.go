@@ -54,6 +54,45 @@ func validateHTTPURL(value string) error {
 	return nil
 }
 
+func dispatchGroup(args []string, opts options, host string, client device) (string, error) {
+	if len(args) != 1 {
+		return "", usagef("group requires subcommand: status or members")
+	}
+
+	switch args[0] {
+	case "members":
+		value, err := client.Command("multiroom:getSlaveList")
+		if err != nil {
+			return "", err
+		}
+		members, err := NormalizeGroupMembers(value)
+		if err != nil {
+			return "", err
+		}
+		return FormatGroupMembers(members, opts.asJSON)
+	case "status":
+		statusEx, err := client.StatusEx()
+		if err != nil {
+			return "", err
+		}
+		value, err := client.Command("multiroom:getSlaveList")
+		if err != nil {
+			return "", err
+		}
+		members, err := NormalizeGroupMembers(value)
+		if err != nil {
+			return "", err
+		}
+		status, err := NormalizeGroupStatus(host, statusEx, members)
+		if err != nil {
+			return "", err
+		}
+		return FormatGroupStatus(status, opts.asJSON)
+	default:
+		return "", usagef("unknown group subcommand %s", args[0])
+	}
+}
+
 func dispatchPreset(args []string, opts options, client device) (string, error) {
 	if len(args) == 0 {
 		return "", usagef("preset requires subcommand: list or play")

@@ -209,8 +209,10 @@ fields are omitted). Roles are `master` (the selected host reports guest devices
 selected device reports that it is a guest), `standalone` (not grouped and has no guests), or
 `unknown` (the response does not provide enough reliable role information). `group members`
 lists the guest devices reported by the selected host and also supports `--json`; it does not
-discover or modify other devices. There is no mutating group support: join, leave, kick, group
-volume/mute, and channel changes are out of scope.
+discover or modify other devices. There are no first-class mutating group commands: join,
+leave, kick, group volume/mute, and channel changes are out of scope. The `raw` escape hatch
+can issue arbitrary API requests,
+including mutations; use it only with explicit care and permission.
 
 **discover** and **device discover** reject explicit `--host` or `--device` flags — they
 multicast an SSDP search and only list devices that also answer the WiiM HTTP API, so

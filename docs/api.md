@@ -74,8 +74,8 @@ this doesn't join the multicast group or parse `LOCATION`/description XML at all
 `upnp:rootdevice` is answered by any UPnP device (smart TVs, printers, routers, not just
 Linkplay speakers), every responding IP is then validated with a direct `getStatusEx` call;
 only hosts that answer the WiiM HTTP API make it into the result. This validation step is
-also why `discover` works for any Linkplay device, not just WiiM — it doesn't check for a
-WiiM-specific signature, just that `getStatusEx` responds at all (see
+also why `discover` is designed for compatible Linkplay devices, not just WiiM — it doesn't
+check for a WiiM-specific signature, just that `getStatusEx` responds at all (see
 [Compatibility](#compatibility)).
 
 IPv6 isn't supported (IPv4 multicast only), and devices on a different subnet/VLAN than the
@@ -289,7 +289,9 @@ consistent.
 empty identity/group fields are omitted. `name`, `model`, and `firmware` come from
 `DeviceName`, `project`, and `firmware` in `getStatusEx`. `groupName`, `masterUUID`, and
 `wmrmVersion` come from `GroupName`, `master_uuid`, and `wmrm_version` (with the member
-response's `wmrm_version` taking precedence).
+response's `wmrm_version` taking precedence). `groupName` is emitted only when the device
+is grouped (`master` or `slave`); `standalone` and `unknown` statuses omit it even if the
+device's `GroupName` mirrors its `DeviceName`.
 
 Role derivation uses the selected host's `getStatusEx` `group` flag and normalized guest
 list:

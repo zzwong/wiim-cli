@@ -116,6 +116,122 @@ func TestFormatStatusJSONAndHuman(t *testing.T) {
 	}
 }
 
+func TestFormatGroupStatusExactHumanAndJSON(t *testing.T) {
+	status := GroupStatus{
+		Name:        "Living Room",
+		Host:        "speaker.local",
+		Model:       "WiiM_Ultra",
+		Firmware:    "4.8.123",
+		Role:        "master",
+		Grouped:     true,
+		GroupName:   "Downstairs",
+		MemberCount: 2,
+		WMRMVersion: "4.2",
+		MasterUUID:  "master-uuid",
+	}
+	human, err := FormatGroupStatus(status, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHuman := "Name: Living Room\nHost: speaker.local\nModel: WiiM_Ultra\nFirmware: 4.8.123\nRole: master\nGrouped: yes\nGroup name: Downstairs\nMember count: 2\nWMRM version: 4.2\nMaster UUID: master-uuid"
+	if human != wantHuman {
+		t.Fatalf("human = %q, want %q", human, wantHuman)
+	}
+	output, err := FormatGroupStatus(status, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := `{
+  "name": "Living Room",
+  "host": "speaker.local",
+  "model": "WiiM_Ultra",
+  "firmware": "4.8.123",
+  "role": "master",
+  "grouped": true,
+  "groupName": "Downstairs",
+  "memberCount": 2,
+  "wmrmVersion": "4.2",
+  "masterUUID": "master-uuid"
+}`
+	if output != wantJSON {
+		t.Fatalf("JSON = %q, want %q", output, wantJSON)
+	}
+}
+
+func TestFormatGroupMembersExactHumanJSONAndOrder(t *testing.T) {
+	zero := 0
+	no := false
+	yes := true
+	group := GroupMembers{
+		WMRMVersion: "4.2",
+		Count:       2,
+		Members: []GroupMember{
+			{Name: "First", UUID: "u1", IP: "192.0.2.1", Version: "4.2", Type: "A31", Channel: &zero, Volume: &zero, Muted: &no, BatteryPercent: &zero, BatteryCharging: &no, Masked: &no},
+			{Name: "Second", Volume: &zero, Muted: &yes},
+		},
+	}
+	human, err := FormatGroupMembers(group, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHuman := "Member 1:\nName: First\nUUID: u1\nIP: 192.0.2.1\nVersion: 4.2\nType: A31\nChannel: 0\nVolume: 0\nMuted: no\nBattery percent: 0\nBattery charging: no\nMasked: no\n\nMember 2:\nName: Second\nVolume: 0\nMuted: yes"
+	if human != wantHuman {
+		t.Fatalf("human = %q, want %q", human, wantHuman)
+	}
+	output, err := FormatGroupMembers(group, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := `{
+  "wmrmVersion": "4.2",
+  "count": 2,
+  "members": [
+    {
+      "name": "First",
+      "uuid": "u1",
+      "ip": "192.0.2.1",
+      "version": "4.2",
+      "type": "A31",
+      "channel": 0,
+      "volume": 0,
+      "muted": false,
+      "batteryPercent": 0,
+      "batteryCharging": false,
+      "masked": false
+    },
+    {
+      "name": "Second",
+      "volume": 0,
+      "muted": true
+    }
+  ]
+}`
+	if output != wantJSON {
+		t.Fatalf("JSON = %q, want %q", output, wantJSON)
+	}
+}
+
+func TestFormatGroupMembersEmptyUsesNonNilJSONArray(t *testing.T) {
+	human, err := FormatGroupMembers(GroupMembers{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if human != "No group members." {
+		t.Fatalf("human = %q", human)
+	}
+	output, err := FormatGroupMembers(GroupMembers{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := `{
+  "count": 0,
+  "members": []
+}`
+	if output != wantJSON {
+		t.Fatalf("JSON = %q, want %q", output, wantJSON)
+	}
+}
+
 func TestNormalizeNowPrefersMetaAndDecodesHex(t *testing.T) {
 	now := NormalizeNow(map[string]any{"status": "play", "vol": "20", "mute": "1", "Title": "486578", "Artist": "417274697374"}, map[string]any{"metaData": map[string]any{"title": "Meta Title", "artist": "Meta Artist", "sampleRate": "44100"}})
 	if now.Title != "Meta Title" || now.Artist != "Meta Artist" || now.SampleRate != "44100" {

@@ -134,6 +134,88 @@ func FormatStatus(status Status, asJSON bool) (string, error) {
 
 // FormatNow formats a Now struct as human-readable key: value lines or as JSON.
 // Empty fields are omitted from the output.
+// FormatGroupStatus formats a GroupStatus as compact labeled fields or JSON.
+func FormatGroupStatus(status GroupStatus, asJSON bool) (string, error) {
+	if asJSON {
+		return jsonText(status)
+	}
+	var lines []string
+	if status.Name != "" {
+		lines = append(lines, "Name: "+status.Name)
+	}
+	lines = append(lines, "Host: "+status.Host)
+	if status.Model != "" {
+		lines = append(lines, "Model: "+status.Model)
+	}
+	if status.Firmware != "" {
+		lines = append(lines, "Firmware: "+status.Firmware)
+	}
+	lines = append(lines,
+		"Role: "+status.Role,
+		"Grouped: "+yesNo(status.Grouped),
+	)
+	if status.GroupName != "" {
+		lines = append(lines, "Group name: "+status.GroupName)
+	}
+	lines = append(lines, fmt.Sprintf("Member count: %d", status.MemberCount))
+	if status.WMRMVersion != "" {
+		lines = append(lines, "WMRM version: "+status.WMRMVersion)
+	}
+	if status.MasterUUID != "" {
+		lines = append(lines, "Master UUID: "+status.MasterUUID)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// FormatGroupMembers formats group members in the API's order as labeled
+// blocks, or serializes the stable GroupMembers schema as JSON.
+func FormatGroupMembers(group GroupMembers, asJSON bool) (string, error) {
+	if asJSON {
+		if group.Members == nil {
+			group.Members = []GroupMember{}
+		}
+		return jsonText(group)
+	}
+	if len(group.Members) == 0 {
+		return "No group members.", nil
+	}
+	blocks := make([]string, 0, len(group.Members))
+	for index, member := range group.Members {
+		lines := []string{fmt.Sprintf("Member %d:", index+1)}
+		for _, field := range [][2]string{
+			{"Name", member.Name},
+			{"UUID", member.UUID},
+			{"IP", member.IP},
+			{"Version", member.Version},
+			{"Type", member.Type},
+		} {
+			if field[1] != "" {
+				lines = append(lines, field[0]+": "+field[1])
+			}
+		}
+		if member.Channel != nil {
+			lines = append(lines, fmt.Sprintf("Channel: %d", *member.Channel))
+		}
+		if member.Volume != nil {
+			lines = append(lines, fmt.Sprintf("Volume: %d", *member.Volume))
+		}
+		if member.Muted != nil {
+			lines = append(lines, "Muted: "+yesNo(*member.Muted))
+		}
+		if member.BatteryPercent != nil {
+			lines = append(lines, fmt.Sprintf("Battery percent: %d", *member.BatteryPercent))
+		}
+		if member.BatteryCharging != nil {
+			lines = append(lines, "Battery charging: "+yesNo(*member.BatteryCharging))
+		}
+		if member.Masked != nil {
+			lines = append(lines, "Masked: "+yesNo(*member.Masked))
+		}
+		blocks = append(blocks, strings.Join(lines, "\n"))
+	}
+	return strings.Join(blocks, "\n\n"), nil
+}
+
 func FormatNow(now Now, asJSON bool) (string, error) {
 	if asJSON {
 		return jsonText(now)

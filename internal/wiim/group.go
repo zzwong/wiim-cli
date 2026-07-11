@@ -34,7 +34,94 @@ type GroupMembers struct {
 	Members     []GroupMember `json:"members"`
 }
 
+// GroupStatus describes the selected device's role in a Linkplay multiroom
+// group. It combines getStatusEx identity fields with normalized group members.
+type GroupStatus struct {
+	Name        string `json:"name,omitempty"`
+	Host        string `json:"host"`
+	Model       string `json:"model,omitempty"`
+	Firmware    string `json:"firmware,omitempty"`
+	Role        string `json:"role"`
+	Grouped     bool   `json:"grouped"`
+	GroupName   string `json:"groupName,omitempty"`
+	MemberCount int    `json:"memberCount"`
+	WMRMVersion string `json:"wmrmVersion,omitempty"`
+	MasterUUID  string `json:"masterUUID,omitempty"`
+}
+
 const maxGroupMembers = 128
+
+// NormalizeGroupStatus derives a stable view of the selected device's
+// multiroom role. getStatusEx has varied field capitalization across firmware,
+// so its fields are matched using the same Unicode case-folding rules as group
+// member responses. Ambiguous duplicate fields are rejected.
+func NormalizeGroupStatus(host string, statusEx map[string]any, members GroupMembers) (GroupStatus, error) {
+	statusMap, err := normalizeGroupMap(statusEx, "status response")
+	if err != nil {
+		return GroupStatus{}, err
+	}
+
+	status := GroupStatus{
+		Name:        groupStatusString(statusMap, "DeviceName"),
+		Host:        host,
+		Model:       groupStatusString(statusMap, "project"),
+		Firmware:    groupStatusString(statusMap, "firmware"),
+		MemberCount: len(members.Members),
+		WMRMVersion: groupStatusString(statusMap, "wmrm_version"),
+		MasterUUID:  groupStatusString(statusMap, "master_uuid"),
+	}
+	if members.WMRMVersion != "" {
+		status.WMRMVersion = members.WMRMVersion
+	}
+
+	group, groupKnown := groupStatusGroup(statusMap)
+	switch {
+	case groupKnown && group == 1:
+		status.Role = "slave"
+		status.Grouped = true
+	case groupKnown && group == 0 && status.MemberCount > 0:
+		status.Role = "master"
+		status.Grouped = true
+	case groupKnown && group == 0:
+		status.Role = "standalone"
+	case status.MemberCount > 0:
+		status.Role = "master"
+		status.Grouped = true
+	default:
+		status.Role = "unknown"
+	}
+	if status.Grouped {
+		status.GroupName = groupStatusString(statusMap, "GroupName")
+	}
+	return status, nil
+}
+
+// groupStatusString returns a firmware identity field only when it is a
+// string. A malformed optional identity field is omitted rather than rendered
+// as an implementation-specific value.
+func groupStatusString(status map[string]any, key string) string {
+	value, present := status[canonicalizeGroupKey(key)]
+	if !present {
+		return ""
+	}
+	text, _ := value.(string)
+	return text
+}
+
+// groupStatusGroup reports whether getStatusEx supplied a usable Linkplay
+// group flag. Values other than 0 or 1 deliberately fall through to the
+// member-based role fallback.
+func groupStatusGroup(status map[string]any) (int, bool) {
+	value, present := status[canonicalizeGroupKey("group")]
+	if !present {
+		return 0, false
+	}
+	group, err := groupInt(value, "group")
+	if err != nil || (group != 0 && group != 1) {
+		return 0, false
+	}
+	return group, true
+}
 
 // NormalizeGroupMembers normalizes current and legacy Linkplay multiroom
 // responses. Linkplay firmware has changed both key capitalization and scalar

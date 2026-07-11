@@ -8,6 +8,91 @@ import (
 	"testing"
 )
 
+func TestNormalizeGroupStatusDerivesEveryRole(t *testing.T) {
+	members := GroupMembers{Members: []GroupMember{{Name: "Kitchen"}}}
+	cases := []struct {
+		name    string
+		group   any
+		present bool
+		members GroupMembers
+		role    string
+		grouped bool
+	}{
+		{"slave number", float64(1), true, GroupMembers{}, "slave", true},
+		{"master numeric string", "0", true, members, "master", true},
+		{"standalone json number", json.Number("0"), true, GroupMembers{}, "standalone", false},
+		{"malformed falls back to master", "not-a-number", true, members, "master", true},
+		{"malformed falls back to unknown", 2, true, GroupMembers{}, "unknown", false},
+		{"missing falls back to master", nil, false, members, "master", true},
+		{"missing falls back to unknown", nil, false, GroupMembers{}, "unknown", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			statusEx := map[string]any{}
+			if tc.present {
+				statusEx["group"] = tc.group
+			}
+			got, err := NormalizeGroupStatus("192.0.2.10", statusEx, tc.members)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Role != tc.role || got.Grouped != tc.grouped || got.MemberCount != len(tc.members.Members) {
+				t.Fatalf("status = %#v, want role=%q grouped=%t member count=%d", got, tc.role, tc.grouped, len(tc.members.Members))
+			}
+		})
+	}
+}
+
+func TestNormalizeGroupStatusCaseFoldedIdentityAndVersionPreference(t *testing.T) {
+	members := GroupMembers{WMRMVersion: "5.0", Members: []GroupMember{{}}}
+	got, err := NormalizeGroupStatus("speaker.local", map[string]any{
+		"dEvIcEnAmE":   "Living Room",
+		"PROJECT":      "WiiM_Ultra",
+		"FiRmWaRe":     "4.8.123",
+		"gRoUp":        "0",
+		"gRoUpNaMe":    "Downstairs",
+		"MaStEr_UuId":  "master-uuid",
+		"WmRm_VeRsIoN": "4.2",
+	}, members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := GroupStatus{
+		Name:        "Living Room",
+		Host:        "speaker.local",
+		Model:       "WiiM_Ultra",
+		Firmware:    "4.8.123",
+		Role:        "master",
+		Grouped:     true,
+		GroupName:   "Downstairs",
+		MemberCount: 1,
+		WMRMVersion: "5.0",
+		MasterUUID:  "master-uuid",
+	}
+	if got != want {
+		t.Fatalf("status = %#v, want %#v", got, want)
+	}
+}
+
+func TestNormalizeGroupStatusOmitsStandaloneGroupNameAndOptionalFields(t *testing.T) {
+	got, err := NormalizeGroupStatus("h", map[string]any{
+		"DeviceName": "Office",
+		"group":      0,
+		"GroupName":  "Office",
+	}, GroupMembers{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "Office" || got.Role != "standalone" || got.GroupName != "" || got.Model != "" || got.Firmware != "" || got.WMRMVersion != "" || got.MasterUUID != "" {
+		t.Fatalf("status = %#v", got)
+	}
+}
+
+func TestNormalizeGroupStatusRejectsDuplicateCaseFoldedFields(t *testing.T) {
+	_, err := NormalizeGroupStatus("h", map[string]any{"DeviceName": "Office", "DEVICENAME": "Kitchen"}, GroupMembers{})
+	assertGroupRuntimeError(t, err, `duplicate field "DEVICENAME"`)
+}
+
 func TestNormalizeGroupMembersOfficialModernPopulated(t *testing.T) {
 	const response = `{
 		"slaves": 1,

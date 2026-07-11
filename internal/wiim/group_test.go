@@ -142,14 +142,14 @@ func TestNormalizeGroupMembersRejectsDuplicateNormalizedFields(t *testing.T) {
 		{
 			name:    "top-level field",
 			value:   map[string]any{"slaves": 0, "SLAVES": 0},
-			context: "duplicate field \"slaves\"",
+			context: "duplicate field \"SLAVES\"",
 		},
 		{
 			name: "member field",
 			value: map[string]any{"slaves": 1, "slave_list": []any{
 				map[string]any{"name": "Office", "NAME": "Kitchen"},
 			}},
-			context: "duplicate field \"name\"",
+			context: "duplicate field \"NAME\"",
 		},
 	}
 	for _, tc := range cases {
@@ -162,7 +162,35 @@ func TestNormalizeGroupMembersRejectsDuplicateNormalizedFields(t *testing.T) {
 
 func TestNormalizeGroupMembersRejectsUnicodeCaseFoldDuplicate(t *testing.T) {
 	_, err := NormalizeGroupMembers(map[string]any{"slaves": 0, "ſlaves": 0})
-	assertGroupRuntimeError(t, err, `duplicate field "slaves"`)
+	assertGroupRuntimeError(t, err, `duplicate field "SLAVES"`)
+}
+
+func TestNormalizeGroupMembersDistinguishesTurkishDottedI(t *testing.T) {
+	value := map[string]any{
+		"slaves": 1,
+		"slave_list": []any{map[string]any{
+			"ip": "192.0.2.10",
+			"İp": "198.51.100.10",
+		}},
+	}
+	got, err := NormalizeGroupMembers(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Members[0].IP != "192.0.2.10" {
+		t.Fatalf("IP = %q, want %q", got.Members[0].IP, "192.0.2.10")
+	}
+
+	got, err = NormalizeGroupMembers(map[string]any{
+		"slaves":     1,
+		"slave_list": []any{map[string]any{"İp": "198.51.100.10"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Members[0].IP != "" {
+		t.Fatalf("Turkish dotted-I key was accepted as ip: %q", got.Members[0].IP)
+	}
 }
 
 func TestGroupIntPlatformBoundaries(t *testing.T) {

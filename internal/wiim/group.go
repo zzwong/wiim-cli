@@ -51,7 +51,7 @@ func NormalizeGroupMembers(value any) (GroupMembers, error) {
 		return GroupMembers{}, err
 	}
 
-	if version, present := response["wmrm_version"]; present {
+	if version, present := response[canonicalizeGroupKey("wmrm_version")]; present {
 		parsed, err := groupString(version, "wmrm_version")
 		if err != nil {
 			return GroupMembers{}, err
@@ -59,7 +59,7 @@ func NormalizeGroupMembers(value any) (GroupMembers, error) {
 		group.WMRMVersion = parsed
 	}
 
-	slavesValue, present := response["slaves"]
+	slavesValue, present := response[canonicalizeGroupKey("slaves")]
 	if !present {
 		return GroupMembers{}, runtimef("multiroom response missing slaves")
 	}
@@ -71,7 +71,7 @@ func NormalizeGroupMembers(value any) (GroupMembers, error) {
 		return GroupMembers{}, runtimef("slaves=%d exceeds maximum group members=%d", slaves, maxGroupMembers)
 	}
 
-	listValue, listPresent := response["slave_list"]
+	listValue, listPresent := response[canonicalizeGroupKey("slave_list")]
 	if !listPresent {
 		if slaves != 0 {
 			return GroupMembers{}, runtimef("multiroom response missing slave_list for slaves=%d", slaves)
@@ -134,7 +134,7 @@ func normalizeGroupMember(value any, index int) (GroupMember, error) {
 		{"version", func(v string) { member.Version = v }},
 		{"type", func(v string) { member.Type = v }},
 	} {
-		if value, present := memberMap[field.key]; present {
+		if value, present := memberMap[canonicalizeGroupKey(field.key)]; present {
 			parsed, err := groupString(value, prefix+"."+field.key)
 			if err != nil {
 				return GroupMember{}, err
@@ -151,7 +151,7 @@ func normalizeGroupMember(value any, index int) (GroupMember, error) {
 		{"volume", func(v *int) { member.Volume = v }},
 		{"battery_percent", func(v *int) { member.BatteryPercent = v }},
 	} {
-		if value, present := memberMap[field.key]; present {
+		if value, present := memberMap[canonicalizeGroupKey(field.key)]; present {
 			parsed, err := groupInt(value, prefix+"."+field.key)
 			if err != nil {
 				return GroupMember{}, err
@@ -168,7 +168,7 @@ func normalizeGroupMember(value any, index int) (GroupMember, error) {
 		{"battery_charging", func(v *bool) { member.BatteryCharging = v }},
 		{"mask", func(v *bool) { member.Masked = v }},
 	} {
-		if value, present := memberMap[field.key]; present {
+		if value, present := memberMap[canonicalizeGroupKey(field.key)]; present {
 			parsed, err := groupBool(value, prefix+"."+field.key)
 			if err != nil {
 				return GroupMember{}, err
@@ -179,30 +179,32 @@ func normalizeGroupMember(value any, index int) (GroupMember, error) {
 	return member, nil
 }
 
-// lowerCaseFold returns a lowercase canonical representative for each
-// Unicode simple-fold equivalence class.
-func lowerCaseFold(value string) string {
+// canonicalizeGroupKey returns the minimum rune in each rune's
+// unicode.SimpleFold cycle. This produces one representative for each
+// Unicode simple-fold equivalence class, matching strings.EqualFold without
+// applying Unicode lowercasing or locale-specific case mappings.
+func canonicalizeGroupKey(value string) string {
 	return strings.Map(func(r rune) rune {
-		canonical := unicode.ToLower(r)
+		canonical := r
 		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
-			if lower := unicode.ToLower(folded); lower < canonical {
-				canonical = lower
+			if folded < canonical {
+				canonical = folded
 			}
 		}
 		return canonical
 	}, value)
 }
 
-// normalizeGroupMap lowercases a Linkplay object once so all later field
+// normalizeGroupMap canonicalizes a Linkplay object once so all later field
 // lookups are deterministic. Case variants of the same field are ambiguous.
 func normalizeGroupMap(m map[string]any, context string) (map[string]any, error) {
 	normalized := make(map[string]any, len(m))
 	for key, value := range m {
-		lowerKey := lowerCaseFold(key)
-		if _, exists := normalized[lowerKey]; exists {
-			return nil, runtimef("%s has duplicate field %q", context, lowerKey)
+		canonicalKey := canonicalizeGroupKey(key)
+		if _, exists := normalized[canonicalKey]; exists {
+			return nil, runtimef("%s has duplicate field %q", context, canonicalKey)
 		}
-		normalized[lowerKey] = value
+		normalized[canonicalKey] = value
 	}
 	return normalized, nil
 }

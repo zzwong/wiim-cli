@@ -82,8 +82,7 @@ func (c *Client) MetaInfo() map[string]any {
 
 // SetVolume sets the absolute playback volume (0–100).
 func (c *Client) SetVolume(volume int) error {
-	_, err := c.Command(fmt.Sprintf("setPlayerCmd:vol:%d", volume))
-	return err
+	return c.controlCommand(fmt.Sprintf("setPlayerCmd:vol:%d", volume))
 }
 
 // VolumeUp increases the current volume by the given amount, fetching the
@@ -123,50 +122,42 @@ func (c *Client) Mute(enabled bool) error {
 	if enabled {
 		v = 1
 	}
-	_, err := c.Command(fmt.Sprintf("setPlayerCmd:mute:%d", v))
-	return err
+	return c.controlCommand(fmt.Sprintf("setPlayerCmd:mute:%d", v))
 }
 
 // Playback sends a transport control action: "play", "pause", "stop", "next", "prev".
 func (c *Client) Playback(action string) error {
-	_, err := c.Command("setPlayerCmd:" + action)
-	return err
+	return c.controlCommand("setPlayerCmd:" + action)
 }
 
 // SwitchInput switches the active audio input/source (e.g. "wifi", "bluetooth", "optical").
 func (c *Client) SwitchInput(input string) error {
-	_, err := c.Command("setPlayerCmd:switchmode:" + input)
-	return err
+	return c.controlCommand("setPlayerCmd:switchmode:" + input)
 }
 
 // PlayURL instructs the device to stream a media URL.
 func (c *Client) PlayURL(mediaURL string) error {
-	_, err := c.Command("setPlayerCmd:play:" + mediaURL)
-	return err
+	return c.controlCommand("setPlayerCmd:play:" + mediaURL)
 }
 
 // PlayM3U instructs the device to load and play an M3U playlist URL.
 func (c *Client) PlayM3U(playlistURL string) error {
-	_, err := c.Command("setPlayerCmd:playlist:" + playlistURL)
-	return err
+	return c.controlCommand("setPlayerCmd:playlist:" + playlistURL)
 }
 
 // PlayPromptURL plays a short notification/prompt audio URL on the device.
 func (c *Client) PlayPromptURL(mediaURL string) error {
-	_, err := c.Command("setPlayerCmd:playPromptUrl:" + mediaURL)
-	return err
+	return c.controlCommand("setPlayerCmd:playPromptUrl:" + mediaURL)
 }
 
 // ClearPlaylist clears the current playback queue.
 func (c *Client) ClearPlaylist() error {
-	_, err := c.Command("setPlayerCmd:clear_playlist")
-	return err
+	return c.controlCommand("setPlayerCmd:clear_playlist")
 }
 
 // Seek jumps to the given position (in seconds) within the current track.
 func (c *Client) Seek(seconds int) error {
-	_, err := c.Command(fmt.Sprintf("setPlayerCmd:seek:%d", seconds))
-	return err
+	return c.controlCommand(fmt.Sprintf("setPlayerCmd:seek:%d", seconds))
 }
 
 // PlayPreset triggers the specified preset number. An optional index selects a
@@ -176,8 +167,31 @@ func (c *Client) PlayPreset(preset int, index *int) error {
 	if index != nil {
 		command = fmt.Sprintf("%s:%d", command, *index)
 	}
-	_, err := c.Command(command)
-	return err
+	return c.controlCommand(command)
+}
+
+// controlCommand preserves the raw protocol response contract while surfacing
+// explicit negative acknowledgements for typed controls. Unknown response forms
+// retain their existing behavior; an accepted request does not prove playback.
+func (c *Client) controlCommand(command string) error {
+	value, err := c.Command(command)
+	if err != nil {
+		return err
+	}
+	var failed bool
+	switch value := value.(type) {
+	case string:
+		failed = value == "Failed"
+	case map[string]any:
+		status, ok := value["status"].(string)
+		failed = ok && status == "Failed"
+	}
+	if failed {
+		// Do not reflect the command or response: either can contain private
+		// media URLs, credentials, device metadata, or terminal controls.
+		return runtimef("WiiM device rejected control command: Failed")
+	}
+	return nil
 }
 
 func (c *Client) expectMap(command string) (map[string]any, error) {

@@ -46,6 +46,17 @@ Notes:
 - The device certificate may be self-signed or otherwise invalid; this CLI disables certificate verification for device calls.
 - Most read endpoints return JSON. Some control endpoints return plain strings.
 - Non-2xx HTTP responses are treated as errors by this CLI.
+- Typed control commands also return a runtime error for the exact negative acknowledgement
+  `Failed` (including the JSON string `"Failed"`; outer response whitespace is trimmed),
+  or a JSON object whose
+  exact top-level `status` key is the string `Failed`. Matching is case-sensitive.
+  Other response forms retain their previous behavior. `raw`, read endpoints, and Cast
+  responses are not reclassified. A successful acknowledgement is not confirmation that
+  audio actually played. Rejections are not automatically retried.
+- This distinction is documented by the [WiiM API PDF](https://www.wiimhome.com/pdf/HTTP%20API%20for%20WiiM%20Products.pdf)
+  for several control endpoints, and [reported for Linkplay prompt playback](https://forum.arylic.com/t/doorbell/3535)
+  with HTTP 200 plus `Failed`. These sources do not establish that every model or firmware
+  returns the same acknowledgement for every command.
 
 ## Cast setup endpoint
 

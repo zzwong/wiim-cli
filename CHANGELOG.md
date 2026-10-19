@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Typed WiiM controls surface explicit `Failed` acknowledgements as runtime errors instead
+  of reporting success; raw and read-only response handling remains unchanged.
+
 - Reliability hardening for device/profile configuration, including validation, consistent
   timeout handling, atomic config replacement, and preservation of the config directory.
 

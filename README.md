@@ -219,7 +219,12 @@ multicast an SSDP search and only list devices that also answer the WiiM HTTP AP
 unrelated UPnP gear (TVs, printers, routers) on the same LAN is filtered out. Ambient
 `WIIM_HOST`, `defaultDevice`, and `defaultHost` are ignored by discovery. Discovery is read-only:
 it validates candidates with status requests but does not write config or change device state.
-`--timeout` (default `3.0`s) controls how long it waits for replies. See
+`--timeout` (default `3.0`s) controls the SSDP reply window, not the total command duration.
+Discovery accepts at most 64 distinct responders and validates at most eight concurrently.
+More responders cause a runtime error before validation rather than a truncated success.
+Each candidate can require two HTTP calls with two-second timeouts, so validation can add
+roughly 32 seconds at the limit, plus scheduling overhead. These limits include unrelated
+UPnP responders. See
 [Compatibility in `docs/api.md`](docs/api.md#compatibility) for which devices this can find.
 
 **Spotify** — store credentials once, then log in:

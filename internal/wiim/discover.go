@@ -21,9 +21,16 @@ const ssdpMulticastAddr = "239.255.255.250:1900"
 // validateTimeoutSeconds bounds each per-candidate validation HTTP call.
 // Discovery routinely turns up non-WiiM UPnP devices that never answer the
 // WiiM HTTP API at all, so this is intentionally short and not
-// user-configurable; validation runs concurrently across candidates, so a
-// noisy LAN doesn't multiply this into a slow scan.
+// user-configurable. At most eight candidates are validated concurrently.
+// With at most 64 candidates and two calls each, validation has at most
+// eight waves of two per-call timeouts, in addition to the SSDP listen window.
 const validateTimeoutSeconds = 2.0
+
+// Bound both retained responders and concurrent outbound validations. Overflow
+// fails rather than returning a silently truncated (and potentially misleading)
+// discovery result. These limits include unrelated SSDP responders.
+const maxDiscoveryCandidates = 64
+const discoveryWorkers = 8
 
 // ssdpSearchFunc performs the network I/O for Discover; swappable in tests so
 // command/formatting behavior can be exercised without real UDP traffic.
@@ -57,12 +64,22 @@ func Discover(ssdpTimeout time.Duration) ([]DiscoveredDevice, error) {
 		device DiscoveredDevice
 		ok     bool
 	}
+	if len(ips) > maxDiscoveryCandidates {
+		return nil, runtimef("discovery exceeded %d candidate hosts", maxDiscoveryCandidates)
+	}
 	results := make(chan candidate, len(ips))
+	jobs := make(chan string, len(ips))
 	for _, ip := range ips {
-		go func(ip string) {
-			d, ok := validateDiscoveryCandidate(ip)
-			results <- candidate{d, ok}
-		}(ip)
+		jobs <- ip
+	}
+	close(jobs)
+	for range min(discoveryWorkers, len(ips)) {
+		go func() {
+			for ip := range jobs {
+				d, ok := validateDiscoveryCandidate(ip)
+				results <- candidate{d, ok}
+			}
+		}()
 	}
 
 	found := []DiscoveredDevice{}
@@ -159,10 +176,22 @@ func ssdpSearch(timeout time.Duration) ([]string, error) {
 			break // keep whatever was already collected rather than discard it
 		}
 		ip := addr.IP.String()
-		if !seen[ip] {
-			seen[ip] = true
-			ips = append(ips, ip)
+		ips, err = appendDiscoveryCandidate(ips, seen, ip)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return ips, nil
+}
+
+// appendDiscoveryCandidate keeps duplicate replies from consuming the budget.
+func appendDiscoveryCandidate(ips []string, seen map[string]bool, ip string) ([]string, error) {
+	if seen[ip] {
+		return ips, nil
+	}
+	if len(ips) >= maxDiscoveryCandidates {
+		return nil, runtimef("discovery exceeded %d candidate hosts", maxDiscoveryCandidates)
+	}
+	seen[ip] = true
+	return append(ips, ip), nil
 }

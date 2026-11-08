@@ -400,3 +400,12 @@ wiim spotify play spotify:playlist:<id> [spotify-device-id] [--reauth]
 ```
 
 The Spotify app redirect URI defaults to `http://127.0.0.1:19872/login`; override with config `spotifyRedirectURI` or env `WIIM_SPOTIFY_REDIRECT_URI`. Required scopes are `user-read-playback-state` and `user-modify-playback-state`. Tokens refresh automatically before expiry. If a refresh token is invalid, the stale token is cleared; use `--reauth` to launch the browser login flow automatically for that command. `WIIM_SPOTIFY_TOKEN` or `SPOTIFY_TOKEN` can override the stored token for one-off use.
+
+### Discovery resource limits
+
+The SSDP listen timeout is separate from validation time. Discovery retains at most 64
+unique response-source IPs; a 65th fails with a runtime error and no validation calls or
+partial device list. Duplicate responses do not consume additional slots. At most eight
+candidates are validated concurrently, each with existing two-second status and optional
+Cast calls. The maximum set can therefore add roughly 32 seconds of validation, excluding
+scheduling overhead. This bounds fan-out without silently excluding devices on overflow.

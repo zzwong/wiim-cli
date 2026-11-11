@@ -55,16 +55,16 @@ func TestDiscoverBoundsConcurrentValidation(t *testing.T) {
 		case <-started:
 		case <-time.After(time.Second):
 			close(release)
-			<-done
-			t.Fatal("workers failed to start")
+			err := <-done
+			t.Fatalf("workers failed to start; discovery result: %v", err)
 		}
 	}
 	// All workers are held at the same barrier; no real network is involved.
 	select {
 	case <-started:
 		close(release)
-		<-done
-		t.Fatal("more than eight concurrent validators")
+		err := <-done
+		t.Fatalf("more than eight concurrent validators; discovery result: %v", err)
 	case <-time.After(30 * time.Millisecond):
 	}
 	close(release)

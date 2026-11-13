@@ -114,7 +114,10 @@ func startTestFileServer(t *testing.T, filePath string) *localFileServer {
 	t.Cleanup(func() {
 		_ = server.shutdown(context.Background())
 		select {
-		case <-errCh:
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("serve returned error during cleanup: %v", err)
+			}
 		case <-time.After(time.Second):
 			_ = server.close()
 		}

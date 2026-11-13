@@ -2,6 +2,8 @@ module github.com/zzwong/wiim-cli
 
 go 1.26.10
 
+toolchain go1.27.4
+
 require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.1.0

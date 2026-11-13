@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -360,7 +361,7 @@ func TestTimeoutErrorIncludesWithinMessage(t *testing.T) {
 	}
 }
 
-func TestNonTimeoutErrorIncludesUnderlyingError(t *testing.T) {
+func TestNonTimeoutErrorPreservesInspectionWithoutCauseText(t *testing.T) {
 	client := NewClient("host", 3)
 	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return nil, testNetError{msg: "dial tcp host:443: connect: connection refused", timeout: false}
@@ -372,8 +373,8 @@ func TestNonTimeoutErrorIncludesUnderlyingError(t *testing.T) {
 	if strings.Contains(err.Error(), "within") {
 		t.Fatalf("non-timeout error should not mention timeout duration, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "connection refused") {
-		t.Fatalf("non-timeout error should include underlying error message, got: %v", err)
+	if strings.Contains(err.Error(), "connection refused") || !strings.Contains(err.Error(), "transport failure") {
+		t.Fatalf("non-timeout error should use a safe category, got: %v", err)
 	}
 	var netErr net.Error
 	if !errors.As(err, &netErr) {
@@ -397,5 +398,94 @@ func TestCastInfoUsesHTTP8008(t *testing.T) {
 	}
 	if info["name"] != "WiiM Ultra" {
 		t.Fatalf("info %#v", info)
+	}
+}
+
+func TestPlayURLTransportErrorsDoNotDisclosePrivateData(t *testing.T) {
+	const marker = "private marker/&token=synthetic"
+	mediaURL := "https://media.invalid/song?signature=" + url.QueryEscape(marker)
+	for _, tc := range []struct {
+		name    string
+		cause   error
+		timeout bool
+	}{
+		{"ordinary", errors.New(marker), false},
+		{"timeout", testNetError{msg: marker, timeout: true}, true},
+		{"nested URL", &url.Error{Op: marker, URL: mediaURL, Err: errors.New(marker)}, false},
+		{"nested timeout", &url.Error{Op: marker, URL: mediaURL, Err: testNetError{msg: marker, timeout: true}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			client := NewClient("192.0.2.10", 2.5)
+			client.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.URL.Query().Get("command") != "setPlayerCmd:play:"+mediaURL {
+					t.Fatal("unexpected command")
+				}
+				return nil, tc.cause
+			})}
+			err := client.PlayURL(mediaURL)
+			if err == nil || calls != 1 {
+				t.Fatalf("error=%v calls=%d", err, calls)
+			}
+			for _, asJSON := range []bool{false, true} {
+				out := FormatError(err, asJSON)
+				for _, secret := range []string{marker, url.QueryEscape(marker), url.QueryEscape(url.QueryEscape(marker)), "media.invalid", "command=", "192.0.2.10"} {
+					if strings.Contains(out, secret) {
+						t.Fatalf("private data in output: %s", out)
+					}
+				}
+				if strings.Contains(out, "within 2.5s") != tc.timeout {
+					t.Fatalf("wrong timeout category: %s", out)
+				}
+			}
+			var envelope errorEnvelope
+			if decodeErr := json.Unmarshal([]byte(FormatError(err, true)), &envelope); decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if ExitCode(err) != 1 || envelope.Error.Kind != "runtime" || envelope.Error.ExitCode != 1 {
+				t.Fatalf("wrong classification: %#v", envelope)
+			}
+			if !errors.Is(err, tc.cause) {
+				t.Fatal("cause identity lost")
+			}
+			var netErr net.Error
+			if !errors.As(err, &netErr) || netErr.Timeout() != tc.timeout {
+				t.Fatal("network error inspection lost")
+			}
+		})
+	}
+}
+
+type failingResponseReader struct{ err error }
+
+func (r failingResponseReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestPlayURLResponseReadErrorIsSanitized(t *testing.T) {
+	for _, timeout := range []bool{false, true} {
+		cause := testNetError{msg: "private-read-token", timeout: timeout}
+		calls := 0
+		client := NewClient("192.0.2.10", 2.5)
+		client.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(failingResponseReader{err: cause}), Header: make(http.Header)}, nil
+		})}
+		err := client.PlayURL("https://media.invalid/?token=private-read-token")
+		if err == nil || calls != 1 || ExitCode(err) != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+		for _, asJSON := range []bool{false, true} {
+			out := FormatError(err, asJSON)
+			if strings.Contains(out, "private-read-token") || strings.Contains(out, "192.0.2.10") || !strings.Contains(out, "could not read WiiM response") {
+				t.Fatalf("unsafe/missing diagnostic: %s", out)
+			}
+			if strings.Contains(out, "within 2.5s") != timeout {
+				t.Fatalf("wrong timeout: %s", out)
+			}
+		}
+		var netErr net.Error
+		if !errors.As(err, &netErr) || netErr.Timeout() != timeout || !errors.Is(err, cause) {
+			t.Fatal("lost cause inspection")
+		}
 	}
 }

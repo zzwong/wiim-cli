@@ -211,14 +211,22 @@ func (c *Client) request(rawURL string) (any, error) {
 	if err != nil {
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
-			return nil, fmt.Errorf("could not connect to %s within %.1fs: %w", c.Host, c.Timeout.Seconds(), err)
+			return nil, deviceTransportError{message: fmt.Sprintf("could not connect to WiiM device within %.1fs", c.Timeout.Seconds()), cause: err}
 		}
-		return nil, fmt.Errorf("could not connect to %s: %w", c.Host, err)
+		return nil, deviceTransportError{message: "could not connect to WiiM device: transport failure", cause: err}
 	}
 	defer resp.Body.Close()
 	body, err := readLimitedResponse(resp.Body, wiimAPIResponseLimit)
 	if err != nil {
-		return nil, runtimef("could not read response from %s: %v", c.Host, err)
+		if limitErr, ok := err.(responseLimitError); ok {
+			return nil, runtimef("could not read WiiM response: %s", limitErr.Error())
+		}
+		message := "could not read WiiM response: transport failure"
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			message = fmt.Sprintf("could not read WiiM response within %.1fs", c.Timeout.Seconds())
+		}
+		return nil, deviceTransportError{message: message, cause: err}
 	}
 	text := strings.TrimSpace(string(body))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {

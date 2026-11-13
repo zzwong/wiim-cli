@@ -25,7 +25,12 @@ func readLimitedResponse(reader io.Reader, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("response exceeds %d bytes", limit)
+		return nil, responseLimitError{limit: limit}
 	}
 	return data, nil
 }
+
+// responseLimitError contains only the locally selected response bound.
+type responseLimitError struct{ limit int64 }
+
+func (e responseLimitError) Error() string { return fmt.Sprintf("response exceeds %d bytes", e.limit) }

@@ -409,3 +409,7 @@ partial device list. Duplicate responses do not consume additional slots. At mos
 candidates are validated concurrently, each with existing two-second status and optional
 Cast calls. The maximum set can therefore add roughly 32 seconds of validation, excluding
 scheduling overhead. This bounds fan-out without silently excluding devices on overflow.
+
+Transport failures use sanitized human/JSON diagnostics without request URLs or
+underlying error text. Timeout diagnostics retain the configured duration; Go
+callers can still inspect wrapped causes. See [security](security.md#device-transport-error-output).

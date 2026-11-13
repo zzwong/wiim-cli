@@ -119,3 +119,13 @@ environment. If untrusted parties share your network, consider network-level iso
   code by a malicious application on the same machine. Because the same-user scenario is
   considered out of scope — a local process running as the same user can already read
   secrets directly from the unlocked keyring — the lack of PKCE is an accepted trade-off.
+
+## Device transport error output
+
+Failed WiiM HTTP requests display a fixed transport-failure category, or the
+configured timeout duration. Human and JSON errors do not display request URLs,
+device hosts, or underlying transport messages, which may contain signed media
+URLs or other private command data. Commands are not retried by this error handler.
+Programmatic error inspection through `errors.Is` / `errors.As` remains available;
+unwrapped causes are not sanitized and must not be logged as public diagnostics.
+This boundary does not redact successful/raw device responses or HTTP error bodies.

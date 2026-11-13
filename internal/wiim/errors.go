@@ -88,3 +88,14 @@ func FormatError(err error, asJSON bool) string {
 	}
 	return string(out)
 }
+
+// deviceTransportError keeps request URLs and arbitrary transport text out of
+// public formatting while retaining the cause for programmatic inspection.
+// Callers must not print the unwrapped cause: it can contain private media URLs.
+type deviceTransportError struct {
+	message string
+	cause   error
+}
+
+func (e deviceTransportError) Error() string { return e.message }
+func (e deviceTransportError) Unwrap() error { return e.cause }

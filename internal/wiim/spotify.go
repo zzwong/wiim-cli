@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -125,7 +126,12 @@ func NewSpotifyClient(allowReauth bool, stdout io.Writer, redirectURI ...string)
 		}
 		cached, err = refreshSpotifyToken(creds.clientID, creds.clientSecret, cached.RefreshToken)
 		if err != nil {
-			_ = SpotifyLogout()
+			if !errors.Is(err, errSpotifyInvalidGrant) {
+				return nil, runtimef("Spotify token refresh failed; stored token retained. Retry later")
+			}
+			if err := SpotifyLogout(); err != nil {
+				return nil, err
+			}
 			if allowReauth {
 				fmt.Fprintln(stdout, "Spotify token refresh failed; reauthorizing...")
 				if loginErr := SpotifyLogin(stdout, firstRedirectURI(redirectURI)); loginErr != nil {
@@ -483,6 +489,10 @@ func refreshSpotifyToken(clientID, clientSecret, refreshToken string) (spotifyTo
 	return spotifyTokenRequest(clientID, clientSecret, values, refreshToken)
 }
 
+// Only a validated OAuth invalid_grant response proves that the refresh token
+// should be discarded. Transport failures and other responses do not.
+var errSpotifyInvalidGrant = errors.New("spotify token grant is invalid")
+
 func spotifyTokenRequest(clientID, clientSecret string, values url.Values, fallbackRefresh string) (spotifyTokenCache, error) {
 	req, err := http.NewRequest("POST", spotifyAccountsBaseURL+"/api/token", strings.NewReader(values.Encode()))
 	if err != nil {
@@ -500,6 +510,12 @@ func spotifyTokenRequest(clientID, clientSecret string, values url.Values, fallb
 		return spotifyTokenCache{}, runtimef("could not read Spotify token response: %v", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		var tokenError struct {
+			Code string `json:"error"`
+		}
+		if resp.StatusCode == http.StatusBadRequest && json.Unmarshal(data, &tokenError) == nil && tokenError.Code == "invalid_grant" {
+			return spotifyTokenCache{}, errSpotifyInvalidGrant
+		}
 		return spotifyTokenCache{}, runtimef("Spotify token endpoint returned HTTP %d: %s", resp.StatusCode, responseSnippet(strings.TrimSpace(string(data))))
 	}
 	var tr spotifyTokenResponse
@@ -509,6 +525,9 @@ func spotifyTokenRequest(clientID, clientSecret string, values url.Values, fallb
 	refresh := tr.RefreshToken
 	if refresh == "" {
 		refresh = fallbackRefresh
+	}
+	if strings.TrimSpace(tr.AccessToken) == "" || strings.TrimSpace(refresh) == "" || !strings.EqualFold(tr.TokenType, "Bearer") || tr.ExpiresIn <= 0 || int64(tr.ExpiresIn) > int64((1<<63-1)/time.Second) {
+		return spotifyTokenCache{}, runtimef("Spotify token endpoint returned an invalid token response")
 	}
 	return spotifyTokenCache{AccessToken: tr.AccessToken, RefreshToken: refresh, TokenType: tr.TokenType, Scope: tr.Scope, ExpiresAt: time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)}, nil
 }
